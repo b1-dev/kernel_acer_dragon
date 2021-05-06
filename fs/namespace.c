@@ -23,6 +23,8 @@
 #include "pnode.h"
 #include "internal.h"
 
+#include <linux/xlog.h>
+
 #define HASH_SHIFT ilog2(PAGE_SIZE / sizeof(struct list_head))
 #define HASH_SIZE (1UL << HASH_SHIFT)
 
@@ -695,17 +697,24 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void 
 	struct dentry *root;
 
 	if (!type)
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_kern_mount, vfs_kern_mount, ENODEV\n"); 
 		return ERR_PTR(-ENODEV);
+		}
 
 	mnt = alloc_vfsmnt(name);
 	if (!mnt)
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_kern_mount, vfs_kern_mount,alloc_vfsmnt,  ENOMEM\n"); 
 		return ERR_PTR(-ENOMEM);
+		}
 
 	if (flags & MS_KERNMOUNT)
 		mnt->mnt.mnt_flags = MNT_INTERNAL;
 
 	root = mount_fs(type, flags, name, data);
 	if (IS_ERR(root)) {
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_kern_mount, vfs_kern_mount, mount_fs error\n"); 
 		free_vfsmnt(mnt);
 		return ERR_CAST(root);
 	}
@@ -1800,11 +1809,17 @@ do_kern_mount(const char *fstype, int flags, const char *name, void *data)
 	struct file_system_type *type = get_fs_type(fstype);
 	struct vfsmount *mnt;
 	if (!type)
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_kern_mount, invalid type\n"); 
 		return ERR_PTR(-ENODEV);
+		}
 	mnt = vfs_kern_mount(type, flags, name, data);
 	if (!IS_ERR(mnt) && (type->fs_flags & FS_HAS_SUBTYPE) &&
 	    !mnt->mnt_sb->s_subtype)
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_kern_mount, fs_set_subtype\n"); 
 		mnt = fs_set_subtype(mnt, fstype);
+		}
 	put_filesystem(type);
 	return mnt;
 }
@@ -1820,21 +1835,33 @@ static int do_add_mount(struct mount *newmnt, struct path *path, int mnt_flags)
 
 	err = lock_mount(path);
 	if (err)
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_add_mount, lock_mount error, ret\n"); 
 		return err;
+		}
 
 	err = -EINVAL;
 	if (!(mnt_flags & MNT_SHRINKABLE) && !check_mnt(real_mount(path->mnt)))
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_add_mount, err = -EINVAL (MNT_SHRINKABLE)\n"); 
 		goto unlock;
+		}
 
 	/* Refuse the same filesystem on the same mount point */
 	err = -EBUSY;
 	if (path->mnt->mnt_sb == newmnt->mnt.mnt_sb &&
 	    path->mnt->mnt_root == path->dentry)
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_add_mount, err = -EBUSY\n"); 
 		goto unlock;
+		}
 
 	err = -EINVAL;
 	if (S_ISLNK(newmnt->mnt.mnt_root->d_inode->i_mode))
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_add_mount, err = -EINVAL(S_ISLNK)\n"); 
 		goto unlock;
+		}
 
 	newmnt->mnt.mnt_flags = mnt_flags;
 	err = graft_tree(newmnt, path);
@@ -1855,19 +1882,31 @@ static int do_new_mount(struct path *path, char *type, int flags,
 	int err;
 
 	if (!type)
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_new_mount, invalid type\n"); 
 		return -EINVAL;
+		}
 
 	/* we need capabilities... */
 	if (!capable(CAP_SYS_ADMIN))
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_new_mount, capability error\n"); 
 		return -EPERM;
+		}
 
 	mnt = do_kern_mount(type, flags, name, data);
 	if (IS_ERR(mnt))
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_new_mount, do_kern_mount error\n"); 
 		return PTR_ERR(mnt);
+		}
 
 	err = do_add_mount(real_mount(mnt), path, mnt_flags);
 	if (err)
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_new_mount, do_add_mount error\n"); 
 		mntput(mnt);
+		}
 	return err;
 }
 
@@ -2136,7 +2175,10 @@ long do_mount(char *dev_name, char *dir_name, char *type_page,
 	/* Basic sanity checks */
 
 	if (!dir_name || !*dir_name || !memchr(dir_name, 0, PAGE_SIZE))
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_mount, invalid argument \n"); 
 		return -EINVAL;
+		}
 
 	if (data_page)
 		((char *)data_page)[PAGE_SIZE - 1] = 0;
@@ -2144,12 +2186,18 @@ long do_mount(char *dev_name, char *dir_name, char *type_page,
 	/* ... and get the mountpoint */
 	retval = kern_path(dir_name, LOOKUP_FOLLOW, &path);
 	if (retval)
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_mount, kern_path ret err \n"); 
 		return retval;
+		}
 
 	retval = security_sb_mount(dev_name, &path,
 				   type_page, flags, data_page);
 	if (retval)
+		{
+		xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_mount, security_sb_mount ret err \n"); 
 		goto dput_out;
+		}
 
 	/* Default to relatime unless overriden */
 	if (!(flags & MS_NOATIME))
@@ -2176,17 +2224,37 @@ long do_mount(char *dev_name, char *dir_name, char *type_page,
 		   MS_STRICTATIME);
 
 	if (flags & MS_REMOUNT)
+		{		
 		retval = do_remount(&path, flags & ~MS_REMOUNT, mnt_flags,
 				    data_page);
+		if(retval)
+			xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_mount, do_remount: %d\n", retval); 		
+		}
 	else if (flags & MS_BIND)
+		{
 		retval = do_loopback(&path, dev_name, flags & MS_REC);
+		if(retval)
+			xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_mount, do_loopback: %d\n", retval); 
+		}
 	else if (flags & (MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE))
+		{
 		retval = do_change_type(&path, flags);
+		if(retval)
+			xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_mount, do_change_type: %d\n", retval); 
+		}
 	else if (flags & MS_MOVE)
+		{
 		retval = do_move_mount(&path, dev_name);
+		if(retval)
+			xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_mount, do_move_mount: %d\n", retval); 
+		}
 	else
+		{
 		retval = do_new_mount(&path, type_page, flags, mnt_flags,
 				      dev_name, data_page);
+		if(retval)
+			xlog_printk(ANDROID_LOG_DEBUG, "MNT_TAG", "do_mount, do_new_mount: %d\n", retval); 
+		}
 dput_out:
 	path_put(&path);
 	return retval;

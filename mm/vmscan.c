@@ -3278,15 +3278,25 @@ int kswapd_run(int nid)
 	return ret;
 }
 
+        /*
+         * kernel patch
+         * commit: 0e343dbe08acb440f7914d989bcc32c1d1576735
+         * https://android.googlesource.com/kernel/common/+/0e343dbe08acb440f7914d989bcc32c1d1576735%5E!/#F0
+         */
 /*
- * Called by memory hotplug when all memory in a node is offlined.
+ * Called by memory hotplug when all memory in a node is offlined.  Caller must
+ * hold lock_memory_hotplug().
  */
 void kswapd_stop(int nid)
 {
 	struct task_struct *kswapd = NODE_DATA(nid)->kswapd;
 
-	if (kswapd)
+	//if (kswapd)
+	//	kthread_stop(kswapd);
+	if (kswapd) {
 		kthread_stop(kswapd);
+		NODE_DATA(nid)->kswapd = NULL;
+	}
 }
 
 static int __init kswapd_init(void)

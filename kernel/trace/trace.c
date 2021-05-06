@@ -236,7 +236,8 @@ int tracing_is_enabled(void)
  * to not have to wait for all that output. Anyway this can be
  * boot time and run time configurable.
  */
-#define TRACE_BUF_SIZE_DEFAULT	1441792UL /* 16384 * 88 (sizeof(entry)) */
+// #define TRACE_BUF_SIZE_DEFAULT	1441792UL /* 16384 * 88 (sizeof(entry)) */
+#define TRACE_BUF_SIZE_DEFAULT	5767168UL /* 16384 * 88 *4 (sizeof(entry)) */
 
 static unsigned long		trace_buf_size = TRACE_BUF_SIZE_DEFAULT;
 
@@ -339,8 +340,7 @@ static DECLARE_WAIT_QUEUE_HEAD(trace_wait);
 /* trace_flags holds trace_options default values */
 unsigned long trace_flags = TRACE_ITER_PRINT_PARENT | TRACE_ITER_PRINTK |
 	TRACE_ITER_ANNOTATE | TRACE_ITER_CONTEXT_INFO | TRACE_ITER_SLEEP_TIME |
-	TRACE_ITER_GRAPH_TIME | TRACE_ITER_RECORD_CMD | TRACE_ITER_OVERWRITE |
-	TRACE_ITER_IRQ_INFO;
+	TRACE_ITER_GRAPH_TIME | TRACE_ITER_RECORD_CMD | TRACE_ITER_OVERWRITE ;
 
 static int trace_stop_count;
 static DEFINE_RAW_SPINLOCK(tracing_start_lock);
@@ -965,7 +965,8 @@ void tracing_reset_current_online_cpus(void)
 	tracing_reset_online_cpus(&global_trace);
 }
 
-#define SAVED_CMDLINES 128
+// #define SAVED_CMDLINES 128
+#define SAVED_CMDLINES 512
 #define NO_CMDLINE_MAP UINT_MAX
 static unsigned map_pid_to_cmdline[PID_MAX_DEFAULT+1];
 static unsigned map_cmdline_to_pid[SAVED_CMDLINES];
@@ -1016,6 +1017,9 @@ void tracing_start(void)
 
 	if (tracing_disabled)
 		return;
+
+    // reset ring buffer
+    tracing_reset_current_online_cpus();
 
 	raw_spin_lock_irqsave(&tracing_start_lock, flags);
 	if (--trace_stop_count) {
@@ -1152,6 +1156,49 @@ void trace_find_cmdline(int pid, char comm[])
 	preempt_enable();
 }
 
+#ifdef CONFIG_MTK_SCHED_TRACERS
+int get_irq_pid(int irq)
+{
+	return CONFIG_BASE_SMALL ? ((PID_MAX_DEFAULT - 96) + irq): ((PID_MAX_DEFAULT - 2768) + irq);
+}
+void tracing_record_isr(int irq, char* name){
+
+	unsigned irq_pid, idx, pid;
+	int i;
+
+	irq_pid =get_irq_pid(irq);
+
+	if (!arch_spin_trylock(&trace_cmdline_lock))
+		return;
+
+	idx = map_pid_to_cmdline[irq_pid];
+	if (idx == NO_CMDLINE_MAP) {
+		idx = (cmdline_idx + 1) % SAVED_CMDLINES;
+
+		/*
+		 * Check whether the cmdline buffer at idx has a pid
+		 * mapped. We are going to overwrite that entry so we
+		 * need to clear the map_pid_to_cmdline. Otherwise we
+		 * would read the new comm for the old pid.
+		 */
+		pid = map_cmdline_to_pid[idx];
+		if (pid!= NO_CMDLINE_MAP)
+			map_pid_to_cmdline[pid] = NO_CMDLINE_MAP;
+
+		map_cmdline_to_pid[idx] = irq_pid;
+		map_pid_to_cmdline[irq_pid] = idx;
+		cmdline_idx = idx;
+	}
+	memcpy(&saved_cmdlines[idx], name, TASK_COMM_LEN);
+	for(i = 0 ;i <TASK_COMM_LEN ;i++){
+		if(saved_cmdlines[idx][i]=='-')
+			saved_cmdlines[idx][i] = '_';
+	}
+	saved_cmdlines[idx][TASK_COMM_LEN-1] = 0;
+	arch_spin_unlock(&trace_cmdline_lock);
+	
+}
+#endif
 void tracing_record_cmdline(struct task_struct *tsk)
 {
 	if (atomic_read(&trace_record_cmdline_disabled) || !tracer_enabled ||
@@ -2648,10 +2695,12 @@ tracing_cpumask_write(struct file *filp, const char __user *ubuf,
 		if (cpumask_test_cpu(cpu, tracing_cpumask) &&
 				!cpumask_test_cpu(cpu, tracing_cpumask_new)) {
 			atomic_inc(&global_trace.data[cpu]->disabled);
+            ring_buffer_record_disable_cpu(global_trace.buffer, cpu);
 		}
 		if (!cpumask_test_cpu(cpu, tracing_cpumask) &&
 				cpumask_test_cpu(cpu, tracing_cpumask_new)) {
 			atomic_dec(&global_trace.data[cpu]->disabled);
+            ring_buffer_record_enable_cpu(global_trace.buffer, cpu);
 		}
 	}
 	arch_spin_unlock(&ftrace_max_lock);
@@ -2931,6 +2980,7 @@ tracing_ctrl_write(struct file *filp, const char __user *ubuf,
 
 		/* Only need to warn if this is used to change the state */
 		WARN_ONCE(1, "tracing_enabled is deprecated. Use tracing_on");
+        printk("[ftrace]tracing_enabled is toggled to %lu\n", val);
 
 		if (val) {
 			tracer_enabled = 1;
@@ -3563,6 +3613,12 @@ static ssize_t tracing_splice_read_pipe(struct file *filp,
 		.pages		= pages_def,
 		.partial	= partial_def,
 		.nr_pages	= 0, /* This gets updated below. */
+                /*
+                 * kernel patch
+                 * commit: 2c07f25ea7800adb36cd8da9b58c4ecd3fc3d064
+                 * https://android.googlesource.com/kernel/common/+/2c07f25ea7800adb36cd8da9b58c4ecd3fc3d064%5E!/#F0
+                 */
+		.nr_pages_max	= PIPE_DEF_BUFFERS,
 		.flags		= flags,
 		.ops		= &tracing_pipe_buf_ops,
 		.spd_release	= tracing_spd_release_pipe,
@@ -3634,7 +3690,13 @@ static ssize_t tracing_splice_read_pipe(struct file *filp,
 
 	ret = splice_to_pipe(pipe, &spd);
 out:
-	splice_shrink_spd(pipe, &spd);
+        /*
+         * kernel patch
+         * commit: 2c07f25ea7800adb36cd8da9b58c4ecd3fc3d064
+         * https://android.googlesource.com/kernel/common/+/2c07f25ea7800adb36cd8da9b58c4ecd3fc3d064%5E!/#F0
+         */
+	//splice_shrink_spd(pipe, &spd);
+	splice_shrink_spd(&spd);
 	return ret;
 
 out_err:
@@ -4124,6 +4186,12 @@ tracing_buffers_splice_read(struct file *file, loff_t *ppos,
 	struct splice_pipe_desc spd = {
 		.pages		= pages_def,
 		.partial	= partial_def,
+                /*
+                 * kernel patch
+                 * commit: 2c07f25ea7800adb36cd8da9b58c4ecd3fc3d064
+                 * https://android.googlesource.com/kernel/common/+/2c07f25ea7800adb36cd8da9b58c4ecd3fc3d064%5E!/#F0
+                 */
+		.nr_pages_max	= PIPE_DEF_BUFFERS,
 		.flags		= flags,
 		.ops		= &buffer_pipe_buf_ops,
 		.spd_release	= buffer_spd_release,
@@ -4211,7 +4279,13 @@ tracing_buffers_splice_read(struct file *file, loff_t *ppos,
 	}
 
 	ret = splice_to_pipe(pipe, &spd);
-	splice_shrink_spd(pipe, &spd);
+        /*
+         * kernel patch
+         * commit: 2c07f25ea7800adb36cd8da9b58c4ecd3fc3d064
+         * https://android.googlesource.com/kernel/common/+/2c07f25ea7800adb36cd8da9b58c4ecd3fc3d064%5E!/#F0
+         */
+	//splice_shrink_spd(pipe, &spd);
+	splice_shrink_spd(&spd);
 out:
 	return ret;
 }
@@ -4658,6 +4732,7 @@ rb_simple_write(struct file *filp, const char __user *ubuf,
 		return ret;
 
 	if (buffer) {
+        printk("[ftrace]tracing_on is toggled to %lu\n", val);
 		if (val)
 			ring_buffer_record_on(buffer);
 		else
@@ -4675,6 +4750,44 @@ static const struct file_operations rb_simple_fops = {
 	.write		= rb_simple_write,
 	.llseek		= default_llseek,
 };
+
+#ifdef CONFIG_MTK_KERNEL_MARKER
+static int mt_kernel_marker_enabled = 1;
+static ssize_t
+mt_kernel_marker_enabled_simple_read(struct file *filp, char __user *ubuf,
+	       size_t cnt, loff_t *ppos)
+{
+	char buf[64];
+	int r;
+
+	r = sprintf(buf, "%d\n", mt_kernel_marker_enabled);
+
+	return simple_read_from_buffer(ubuf, cnt, ppos, buf, r);
+}
+static ssize_t
+mt_kernel_marker_enabled_simple_write(struct file *filp, const char __user *ubuf,
+		size_t cnt, loff_t *ppos)
+{
+	unsigned long val;
+	int ret;
+
+	ret = kstrtoul_from_user(ubuf, cnt, 10, &val);
+	if (ret)
+		return ret;
+
+    mt_kernel_marker_enabled = !!val;
+
+	(*ppos)++;
+
+	return cnt;
+}
+static const struct file_operations kernel_marker_simple_fops = {
+	.open		= tracing_open_generic,
+	.read		= mt_kernel_marker_enabled_simple_read,
+	.write		= mt_kernel_marker_enabled_simple_write,
+	.llseek		= default_llseek,
+};
+#endif
 
 static __init int tracer_init_debugfs(void)
 {
@@ -4738,6 +4851,10 @@ static __init int tracer_init_debugfs(void)
 	trace_create_file("tracing_on", 0644, d_tracer,
 			    &global_trace, &rb_simple_fops);
 
+#ifdef CONFIG_MTK_KERNEL_MARKER
+	trace_create_file("mt_kernel_marker", 0644, d_tracer,
+			    NULL, &kernel_marker_simple_fops);
+#endif
 #ifdef CONFIG_DYNAMIC_FTRACE
 	trace_create_file("dyn_ftrace_total_info", 0444, d_tracer,
 			&ftrace_update_tot_cnt, &tracing_dyn_info_fops);
@@ -5038,6 +5155,85 @@ __init static int clear_boot_tracer(void)
 	return 0;
 }
 
+#ifdef CONFIG_MTK_KERNEL_MARKER
+static unsigned long __read_mostly tracing_mark_write_addr = 0;
+static void inline __mt_update_tracing_mark_write_addr(){
+    if(unlikely(tracing_mark_write_addr == 0))
+        tracing_mark_write_addr = kallsyms_lookup_name("tracing_mark_write");
+}
+
+void inline mt_kernel_trace_begin(char *name){
+    if(mt_kernel_marker_enabled){
+        __mt_update_tracing_mark_write_addr();
+        event_trace_printk(tracing_mark_write_addr,
+                "B|%d|%s\n", current->pid, name);
+    }
+}
+EXPORT_SYMBOL(mt_kernel_trace_begin);
+
+void inline mt_kernel_trace_counter(char *name, int count){
+    if(mt_kernel_marker_enabled){
+        __mt_update_tracing_mark_write_addr();
+        event_trace_printk(tracing_mark_write_addr,
+                "C|%d|%s|%d\n", current->pid, name, count);
+    }
+}
+EXPORT_SYMBOL(mt_kernel_trace_counter);
+
+void inline mt_kernel_trace_end(){
+    if(mt_kernel_marker_enabled){
+        __mt_update_tracing_mark_write_addr();
+        event_trace_printk(tracing_mark_write_addr,
+                "E\n"); 
+    }
+}
+EXPORT_SYMBOL(mt_kernel_trace_end);
+#endif
+
+#ifdef CONFIG_MTK_SCHED_TRACERS
+/*Set default tracer*/
+__init static int tracer_late_init(void){
+#if 0
+    int err;
+    err = tracing_set_tracer("sched_switch");
+    if(err < 0)
+	printk("[ftrace] no sched_switch tracer\n");
+#endif
+
+    int err;
+    if((err = trace_set_clr_event("sched", "sched_switch", 1))){
+        printk("[ftrace] fail to enable sched_switch event\n");
+        return err;
+    }
+    if((err=trace_set_clr_event("sched", "sched_wakeup", 1))){
+        printk("[ftrace] fail to enable sched_wakeup event\n");
+        return err;
+    }
+    if((err=trace_set_clr_event("sched", "sched_wakeup_new", 1))){
+        printk("[ftrace] fail to enable sched_wakeup_new event\n");
+        return err;
+    }
+    if((err=trace_set_clr_event("irq", "irq_handler_entry", 1))){
+        printk("[ftrace] fail to enable irq_handler_entry event\n");
+        return err;
+    }
+    if((err=trace_set_clr_event("irq", "irq_handler_exit", 1))){
+        printk("[ftrace] fail to enable irq_handler_exit event\n");
+        return err;
+    }
+#ifdef CONFIG_SMP
+    if((err=trace_set_clr_event("sched", "sched_migrate_task", 1))){
+        printk("[ftrace] fail to enable sched_migrate_task event\n");
+        return err;
+    }
+#endif
+    return 0;
+}
+#endif
+
 early_initcall(tracer_alloc_buffers);
 fs_initcall(tracer_init_debugfs);
 late_initcall(clear_boot_tracer);
+#ifdef CONFIG_MTK_SCHED_TRACERS
+late_initcall(tracer_late_init);
+#endif

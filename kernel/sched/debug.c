@@ -15,6 +15,9 @@
 #include <linux/seq_file.h>
 #include <linux/kallsyms.h>
 #include <linux/utsname.h>
+#ifdef CONFIG_KGDB_KDB
+#include <linux/kdb.h>
+#endif
 
 #include "sched.h"
 
@@ -24,14 +27,25 @@ static DEFINE_SPINLOCK(sched_debug_lock);
  * This allows printing both to /proc/sched_debug and
  * to the console
  */
+#ifndef CONFIG_KGDB_KDB
 #define SEQ_printf(m, x...)			\
  do {						\
 	if (m)					\
 		seq_printf(m, x);		\
-	else					\
-		printk(x);			\
+	else						\
+		printk(x);				\
  } while (0)
-
+#else
+#define SEQ_printf(m, x...)			\
+ do {						\
+	if (m)					\
+		seq_printf(m, x);		\
+	else if (__get_cpu_var(kdb_in_use) == 1)		\
+		kdb_printf(x);			\
+	else						\
+		printk(x);				\
+ } while (0)
+#endif
 /*
  * Ease the printing of nsec fields:
  */
@@ -257,7 +271,7 @@ static void print_cpu(struct seq_file *m, int cpu)
 			   cpu, freq / 1000, (freq % 1000));
 	}
 #else
-	SEQ_printf(m, "\ncpu#%d\n", cpu);
+	SEQ_printf(m, "\ncpu#%d: %s\n", cpu, cpu_is_offline(cpu)?"Offline":"Online");
 #endif
 
 #define P(x) \
@@ -306,6 +320,9 @@ static void print_cpu(struct seq_file *m, int cpu)
 
 	rcu_read_lock();
 	print_rq(m, rq, cpu);
+	SEQ_printf(m,
+	"======================================================"
+	"====================================================\n");
 	rcu_read_unlock();
 	spin_unlock_irqrestore(&sched_debug_lock, flags);
 }
@@ -366,9 +383,11 @@ static int sched_debug_show(struct seq_file *m, void *v)
 		sysctl_sched_tunable_scaling,
 		sched_tunable_scaling_names[sysctl_sched_tunable_scaling]);
 
-	for_each_online_cpu(cpu)
+	read_lock_irqsave(&tasklist_lock, flags);
+	//for_each_online_cpu(cpu)
+	for_each_possible_cpu(cpu)
 		print_cpu(m, cpu);
-
+	read_unlock_irqrestore(&tasklist_lock, flags);
 	SEQ_printf(m, "\n");
 
 	return 0;

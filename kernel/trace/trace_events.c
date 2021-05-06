@@ -1297,7 +1297,7 @@ void trace_remove_event_call(struct ftrace_event_call *call)
 	     (unsigned long)event < (unsigned long)end;		\
 	     event++)
 
-#ifdef CONFIG_MODULES
+#if defined(CONFIG_MODULES) && defined(CONFIG_FTRACE_MODULE_SUPPORT)
 
 static LIST_HEAD(ftrace_module_file_list);
 

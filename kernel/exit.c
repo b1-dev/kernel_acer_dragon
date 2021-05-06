@@ -59,6 +59,8 @@
 #include <asm/pgtable.h>
 #include <asm/mmu_context.h>
 
+#include <mtlbprof/mtlbprof.h>
+
 static void exit_mm(struct task_struct * tsk);
 
 static void __unhash_process(struct task_struct *p, bool group_dead)
@@ -643,6 +645,12 @@ static void exit_mm(struct task_struct * tsk)
 	mm_release(tsk, mm);
 	if (!mm)
 		return;
+        /*
+         * kernel patch
+         * commit: 21017faf87a93117ca7a14aa8f0dd2f315fdeb08
+         * https://android.googlesource.com/kernel/common/+/21017faf87a93117ca7a14aa8f0dd2f315fdeb08%5E!/#F0
+         */
+	sync_mm_rss(mm);
 	/*
 	 * Serialize with any possible pending coredump.
 	 * We must hold mmap_sem around checking core_state
@@ -895,12 +903,23 @@ static void check_stack_usage(void)
 static inline void check_stack_usage(void) {}
 #endif
 
+#ifdef CONFIG_SCHEDSTATS
+/* mt shceduler profiling*/
+extern void end_mtproc_info(struct task_struct *p);
+#endif
+
 void do_exit(long code)
 {
 	struct task_struct *tsk = current;
 	int group_dead;
 
 	profile_task_exit(tsk);
+#ifdef CONFIG_SCHEDSTATS
+	/* mt shceduler profiling*/
+	printk(KERN_DEBUG "[%d:%s] exit\n", tsk->pid, tsk->comm);
+	mt_lbprof_printf(MT_LBPROF_TASK, "%d:exit:%d:%s\n", task_cpu(tsk), tsk->pid, tsk->comm);
+	end_mtproc_info(tsk);
+#endif
 
 	WARN_ON(blk_needs_flush_plug(tsk));
 

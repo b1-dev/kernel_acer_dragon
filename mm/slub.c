@@ -30,6 +30,7 @@
 #include <linux/fault-inject.h>
 #include <linux/stacktrace.h>
 #include <linux/prefetch.h>
+#include <linux/aee.h>
 
 #include <trace/events/kmem.h>
 
@@ -635,6 +636,7 @@ static void object_err(struct kmem_cache *s, struct page *page,
 {
 	slab_bug(s, "%s", reason);
 	print_trailer(s, page, object);
+        aee_kernel_warning("[SLUB_DEBUG]", __FUNCTION__);
 }
 
 static void slab_err(struct kmem_cache *s, struct page *page, char *fmt, ...)
@@ -648,6 +650,7 @@ static void slab_err(struct kmem_cache *s, struct page *page, char *fmt, ...)
 	slab_bug(s, "%s", buf);
 	print_page_info(page);
 	dump_stack();
+        aee_kernel_warning("[SLUB_DEBUG]", __FUNCTION__);
 }
 
 static void init_object(struct kmem_cache *s, void *object, u8 val)
@@ -691,6 +694,7 @@ static int check_bytes_and_report(struct kmem_cache *s, struct page *page,
 	print_trailer(s, page, object);
 
 	restore_bytes(s, what, value, fault, end);
+        aee_kernel_warning("[SLUB_DEBUG]", __FUNCTION__);
 	return 0;
 }
 

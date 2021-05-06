@@ -77,6 +77,10 @@ static int __kprobes notifier_call_chain(struct notifier_block **nl,
 {
 	int ret = NOTIFY_DONE;
 	struct notifier_block *nb, *next_nb;
+#if defined(CONFIG_SMP) && defined(MTK_CPU_HOTPLUG_DEBUG)
+	int index = 0;
+	extern struct raw_notifier_head cpu_chain;
+#endif //#if defined(CONFIG_SMP) && defined(MTK_CPU_HOTPLUG_DEBUG)
 
 	nb = rcu_dereference_raw(*nl);
 
@@ -90,6 +94,14 @@ static int __kprobes notifier_call_chain(struct notifier_block **nl,
 			continue;
 		}
 #endif
+
+#if defined(CONFIG_SMP) && defined(MTK_CPU_HOTPLUG_DEBUG)
+		if (nl == &cpu_chain.head)
+		{
+			printk(KERN_DEBUG "[cpu_ntf] %02lx_%02d, %p\n", val, index++, nb->notifier_call);
+		}
+#endif //#if defined(CONFIG_SMP) && defined(MTK_CPU_HOTPLUG_DEBUG)
+
 		ret = nb->notifier_call(nb, val, v);
 
 		if (nr_calls)

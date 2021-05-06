@@ -26,6 +26,7 @@
 static int try_to_freeze_tasks(bool user_only)
 {
 	struct task_struct *g, *p;
+	struct task_struct *t = NULL;
 	unsigned long end_time;
 	unsigned int todo;
 	bool wq_busy = false;
@@ -59,13 +60,15 @@ static int try_to_freeze_tasks(bool user_only)
 			 * transition can't race with task state testing here.
 			 */
 			if (!task_is_stopped_or_traced(p) &&
-			    !freezer_should_skip(p))
+			    !freezer_should_skip(p)) {
 				todo++;
+				t = p;
+			}
 		} while_each_thread(g, p);
 		read_unlock(&tasklist_lock);
 
 		if (!user_only) {
-			wq_busy = freeze_workqueues_busy();
+			wq_busy = freeze_workqueues_busy(false);
 			todo += wq_busy;
 		}
 
@@ -96,6 +99,9 @@ static int try_to_freeze_tasks(bool user_only)
 		       wakeup ? "aborted" : "failed",
 		       elapsed_csecs / 100, elapsed_csecs % 100,
 		       todo - wq_busy, wq_busy);
+		
+		if (todo - wq_busy) printk(KERN_ERR "\t->fail task: %s[%d]\n",t->comm, t->pid);
+		if (wq_busy) freeze_workqueues_busy(true);
 
 		if (!wakeup) {
 			read_lock(&tasklist_lock);

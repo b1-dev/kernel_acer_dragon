@@ -1065,6 +1065,10 @@ int queue_work(struct workqueue_struct *wq, struct work_struct *work)
 {
 	int ret;
 
+  
+    /*get caller's caller address*/
+    //work->caller_address = __builtin_return_address(1);
+    
 	ret = queue_work_on(get_cpu(), wq, work);
 	put_cpu();
 
@@ -1791,6 +1795,7 @@ static void cwq_dec_nr_in_flight(struct cpu_workqueue_struct *cwq, int color,
  * CONTEXT:
  * spin_lock_irq(gcwq->lock) which is released and regrabbed.
  */
+static struct work_struct *his_work_dbg;
 static void process_one_work(struct worker *worker, struct work_struct *work)
 __releases(&gcwq->lock)
 __acquires(&gcwq->lock)
@@ -1812,6 +1817,10 @@ __acquires(&gcwq->lock)
 	 */
 	struct lockdep_map lockdep_map = work->lockdep_map;
 #endif
+   
+    /*record the last work and get the caller address*/
+    his_work_dbg = work;
+    
 	/*
 	 * A single work shouldn't be executed concurrently by
 	 * multiple workers on a single cpu.  Check whether anyone is
@@ -3680,7 +3689,7 @@ void freeze_workqueues_begin(void)
  * %true if some freezable workqueues are still busy.  %false if freezing
  * is complete.
  */
-bool freeze_workqueues_busy(void)
+bool freeze_workqueues_busy(bool log)
 {
 	unsigned int cpu;
 	bool busy = false;
@@ -3703,6 +3712,7 @@ bool freeze_workqueues_busy(void)
 
 			BUG_ON(cwq->nr_active < 0);
 			if (cwq->nr_active) {
+				if (log) printk("\t->busy wq:%s\n",cwq->wq->name);
 				busy = true;
 				goto out_unlock;
 			}

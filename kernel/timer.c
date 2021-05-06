@@ -47,6 +47,11 @@
 #include <asm/timex.h>
 #include <asm/io.h>
 
+#ifdef CONFIG_MT_LOAD_BALANCE_PROFILER
+#include <mtlbprof/mtlbprof.h>
+#endif
+#include <linux/mt_sched_mon.h>
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/timer.h>
 
@@ -1112,7 +1117,9 @@ static void call_timer_fn(struct timer_list *timer, void (*fn)(unsigned long),
 	lock_map_acquire(&lockdep_map);
 
 	trace_timer_expire_entry(timer);
+    mt_trace_sft_start(fn);
 	fn(data);
+    mt_trace_sft_end(fn);
 	trace_timer_expire_exit(timer);
 
 	lock_map_release(&lockdep_map);
@@ -1343,6 +1350,9 @@ void update_process_times(int user_tick)
 	run_local_timers();
 	rcu_check_callbacks(cpu, user_tick);
 	printk_tick();
+#ifdef CONFIG_MT_LOAD_BALANCE_PROFILER
+	mt_lbprof_tick();
+#endif	
 #ifdef CONFIG_IRQ_WORK
 	if (in_irq())
 		irq_work_run();

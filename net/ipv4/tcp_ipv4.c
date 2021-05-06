@@ -1990,6 +1990,57 @@ void tcp_v4_destroy_sock(struct sock *sk)
 	sock_release_memcg(sk);
 }
 EXPORT_SYMBOL(tcp_v4_destroy_sock);
+/*
+ * tcp_v4_nuke_addr_by_uid - destroy all sockets of spcial uid
+ */
+void tcp_v4_reset_connections_by_uid(uid_t skuid)
+{
+    unsigned int bucket;
+
+    for (bucket = 0; bucket < tcp_hashinfo.ehash_mask; bucket++) {
+        struct hlist_nulls_node *node;
+        struct sock *sk;
+        spinlock_t *lock = inet_ehash_lockp(&tcp_hashinfo, bucket);
+    
+restart:
+        spin_lock_bh(lock);
+        sk_nulls_for_each(sk, node, &tcp_hashinfo.ehash[bucket].chain) {
+    
+            if (sysctl_ip_dynaddr && sk->sk_state == TCP_SYN_SENT)
+                continue;
+            if (sock_flag(sk, SOCK_DEAD))
+                continue;
+    
+            if(sk->sk_socket){
+                if(SOCK_INODE(sk->sk_socket)->i_uid != skuid)
+                    continue;
+                else
+                    printk(KERN_INFO "SIOCKILLSOCK socket uid(%d) match!",
+                        SOCK_INODE(sk->sk_socket)->i_uid);
+            } else{
+                continue;
+	    }
+
+                sock_hold(sk);
+                spin_unlock_bh(lock);
+    
+                local_bh_disable();
+                bh_lock_sock(sk);
+                sk->sk_err = ETIMEDOUT;
+                printk(KERN_INFO "SIOCKILLSOCK set sk err == ETIMEDOUT!! \n");
+                sk->sk_error_report(sk);
+    
+                tcp_done(sk);
+                bh_unlock_sock(sk);
+                local_bh_enable();
+                sock_put(sk);
+
+                goto restart;
+            }
+            spin_unlock_bh(lock);
+        }
+}
+
 
 #ifdef CONFIG_PROC_FS
 /* Proc filesystem TCP sock list dumping. */

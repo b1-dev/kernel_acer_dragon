@@ -20,6 +20,14 @@
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 
+
+#include <linux/statfs.h>
+#include <linux/mount.h>
+#include "mount.h"
+
+#define CHECK_1TH  (10 * 1024 * 1024)
+#define CHECK_2TH  (1 * 1024 * 1024)
+
 const struct file_operations generic_ro_fops = {
 	.llseek		= generic_file_llseek,
 	.read		= do_sync_read,
@@ -420,6 +428,33 @@ EXPORT_SYMBOL(do_sync_write);
 ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
+	struct task_struct *tsk = current;
+	struct kstatfs stat;
+	static long long store = 0;
+	unsigned char num = 0;
+	struct mount *mount_data;
+	char *file_list[10] = {"ccci_fsd", NULL};
+
+	
+	mount_data = real_mount(file->f_path.mnt);
+	if (!memcmp(mount_data->mnt_mountpoint->d_name.name, "data", 5)) {
+		//printk(KERN_ERR "write data detect %s",file->f_path.dentry->d_name.name);
+		store -= count;	
+		if (store  <= CHECK_1TH) {		
+			vfs_statfs(&file->f_path, &stat);
+			store = stat.f_bfree * stat.f_bsize;
+			if (store <= CHECK_2TH) {
+				store -= count;
+				for (; file_list[num] != NULL; num ++) {
+					if (!strcmp(tsk->comm, file_list[num])) 
+						break;
+				}
+				if (file_list[num] == NULL) {
+					return -ENOSPC;
+				} 
+			}
+		}
+	}
 
 	if (!(file->f_mode & FMODE_WRITE))
 		return -EBADF;

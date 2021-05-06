@@ -192,6 +192,7 @@ static char * const zone_names[MAX_NR_ZONES] = {
 };
 
 int min_free_kbytes = 1024;
+int min_free_order_shift = 1;
 
 static unsigned long __meminitdata nr_kernel_pages;
 static unsigned long __meminitdata nr_all_pages;
@@ -1565,7 +1566,7 @@ static bool __zone_watermark_ok(struct zone *z, int order, unsigned long mark,
 		free_pages -= z->free_area[o].nr_free << o;
 
 		/* Require fewer higher order pages to be free */
-		min >>= 1;
+		min >>= min_free_order_shift;
 
 		if (free_pages <= min)
 			return false;
@@ -2218,6 +2219,9 @@ gfp_to_alloc_flags(gfp_t gfp_mask)
 	return alloc_flags;
 }
 
+/* To record minfree[0] in LMK. Initial value is 0. */
+size_t lmk_adjz_minfree = 0;	
+
 static inline struct page *
 __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
 	struct zonelist *zonelist, enum zone_type high_zoneidx,
@@ -2292,8 +2296,17 @@ rebalance:
 	}
 
 	/* Atomic allocations - we can't balance anything */
-	if (!wait)
-		goto nopage;
+	if (!wait) {
+		/* No LMK information! It is safe now(for Android). */
+		if (!lmk_adjz_minfree)
+			goto nopage;
+		/* We only allow direct-reclaim to be executed in "preemptible() & global free memory(< minfree[0])" condition. */
+		if (preemptible() && (global_page_state(NR_FREE_PAGES) < lmk_adjz_minfree)) {
+	    		printk(KERN_WARNING "\n\n\n\n\n [%d:%s]!!!!!! It's yours. Go ahead!!!!!!\n\n\n\n\n", current->pid, current->comm);
+		} else {
+			goto nopage;
+		}
+	}
 
 	/* Avoid recursion of direct reclaim */
 	if (current->flags & PF_MEMALLOC)
@@ -5694,3 +5707,5 @@ void dump_page(struct page *page)
 	dump_page_flags(page->flags);
 	mem_cgroup_print_bad_page(page);
 }
+EXPORT_SYMBOL(dump_page);
+

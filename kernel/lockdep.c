@@ -3018,9 +3018,11 @@ static int __lock_acquire(struct lockdep_map *lock, unsigned int subclass,
 	if (!prove_locking)
 		check = 1;
 
-	if (unlikely(!debug_locks))
+	if (unlikely(!debug_locks)){
+        lock->in_checking = 0;
 		return 0;
-
+    }else
+        lock->in_checking = 1;
 	/*
 	 * Lockdep should run with IRQs disabled, otherwise we could
 	 * get an interrupt which would want to take locks, which would
@@ -3200,6 +3202,8 @@ static int check_unlock(struct task_struct *curr, struct lockdep_map *lock,
 {
 	if (unlikely(!debug_locks))
 		return 0;
+    if (!lock->in_checking)
+        return 0;
 	/*
 	 * Lockdep should run with IRQs disabled, recursion, head-ache, etc..
 	 */

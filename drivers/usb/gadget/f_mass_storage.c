@@ -310,7 +310,8 @@ static const char fsg_string_interface[] = "Mass Storage";
 
 #include "storage_common.c"
 
-
+/*Caution: Use the method would cause write performance drop!!*/
+#define SYNC_THRESHOLD 0 /*This value should be tuned EX:(508*8*1024)*/
 /*-------------------------------------------------------------------------*/
 
 struct fsg_dev;
@@ -405,6 +406,11 @@ struct fsg_common {
 	char inquiry_string[8 + 16 + 4 + 1];
 
 	struct kref		ref;
+
+#ifdef MTK_BICR_SUPPORT
+	int  bicr;
+#endif
+	void (*android_callback)(unsigned char);
 };
 
 struct fsg_config {
@@ -484,6 +490,7 @@ static void set_bulk_out_req_length(struct fsg_common *common,
 	if (rem > 0)
 		length += common->bulk_out_maxpacket - rem;
 	bh->outreq->length = length;
+	bh->outreq->short_not_ok = 1;
 }
 
 
@@ -643,8 +650,19 @@ static int fsg_setup(struct usb_function *f,
 				w_length != 1)
 			return -EDOM;
 		VDBG(fsg, "get max LUN\n");
-		*(u8 *)req->buf = fsg->common->nluns - 1;
 
+#ifdef MTK_BICR_SUPPORT
+		if(fsg->common->bicr) {
+			/*When enable bicr, only share ONE LUN.*/
+			*(u8 *)req->buf = 0;
+		} else {
+			*(u8 *)req->buf = fsg->common->nluns - 1;
+		}
+#else
+		*(u8 *)req->buf = fsg->common->nluns - 1;
+#endif
+
+		INFO(fsg, "get max LUN = %d\n",*(u8 *)req->buf);
 		/* Respond with data/status */
 		req->length = min((u16)1, w_length);
 		return ep0_queue(fsg->common);
@@ -879,6 +897,10 @@ static int do_write(struct fsg_common *common)
 	ssize_t			nwritten;
 	int			rc;
 
+	#if SYNC_THRESHOLD > 0
+	static unsigned int written_amount = 0;
+	#endif
+
 	if (curlun->ro) {
 		curlun->sense_data = SS_WRITE_PROTECTED;
 		return -EINVAL;
@@ -1023,6 +1045,15 @@ static int do_write(struct fsg_common *common)
 				     (int)nwritten, amount);
 				nwritten = round_down(nwritten, curlun->blksize);
 			}
+
+ 			#if SYNC_THRESHOLD > 0
+			if (written_amount >= SYNC_THRESHOLD) {
+				fsg_lun_fsync_sub(curlun);
+				written_amount = 0;
+			} else
+				written_amount += nwritten;
+			#endif
+
 			file_offset += nwritten;
 			amount_left_to_write -= nwritten;
 			common->residue -= nwritten;
@@ -2172,7 +2203,15 @@ static int do_scsi_command(struct fsg_common *common)
 			reply = do_write(common);
 		break;
 
-	/*
+	case REZERO_UNIT:
+		printk("Get REZERO_UNIT command = %x\r\n", common->cmnd[1]);
+		if (common->cmnd[1] == 0xB)
+			common->android_callback(1);
+		else if (common->cmnd[1] == 0xD)
+			common->android_callback(2);
+		break;
+
+ 	/*
 	 * Some mandatory commands that we recognize but don't implement.
 	 * They don't mean much in this setting.  It's left as an exercise
 	 * for anyone interested to implement RESERVE and RELEASE in terms
@@ -2760,7 +2799,9 @@ static struct fsg_common *fsg_common_init(struct fsg_common *common,
 	common->ep0 = gadget->ep0;
 	common->ep0req = cdev->req;
 	common->cdev = cdev;
-
+#ifdef MTK_BICR_SUPPORT
+	common->bicr = 0;
+#endif
 	/* Maybe allocate device-global string IDs, and patch descriptors */
 	if (fsg_strings[FSG_STRING_INTERFACE].id == 0) {
 		rc = usb_string_id(cdev);
@@ -2788,6 +2829,7 @@ static struct fsg_common *fsg_common_init(struct fsg_common *common,
 		curlun->ro = lcfg->cdrom || lcfg->ro;
 		curlun->initially_ro = curlun->ro;
 		curlun->removable = lcfg->removable;
+		curlun->nofua = lcfg->nofua;
 		curlun->dev.release = fsg_lun_release;
 		curlun->dev.parent = &gadget->dev;
 		/* curlun->dev.driver = &fsg_driver.driver; XXX */

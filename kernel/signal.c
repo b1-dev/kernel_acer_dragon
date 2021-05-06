@@ -864,6 +864,7 @@ static int prepare_signal(int sig, struct task_struct *p, bool force)
 		/*
 		 * The process is in the middle of dying, nothing to do.
 		 */
+		return 0;
 	} else if (sig_kernel_stop(sig)) {
 		/*
 		 * This is a stop signal.  Remove SIGCONT from all queues.
@@ -1056,6 +1057,7 @@ static int __send_signal(int sig, struct siginfo *info, struct task_struct *t,
 	int override_rlimit;
 	int ret = 0, result;
 
+    printk(KERN_DEBUG "[%d:%s] sig %d to [%d:%s]\n",current->pid, current->comm, sig, t->pid, t->comm);
 	assert_spin_locked(&t->sighand->siglock);
 
 	result = TRACE_SIGNAL_IGNORED;
@@ -2209,7 +2211,7 @@ relock:
 	 * Now that we woke up, it's crucial if we're supposed to be
 	 * frozen that we freeze now before running anything substantial.
 	 */
-	try_to_freeze();
+	try_to_freeze_nowarn();
 
 	spin_lock_irq(&sighand->siglock);
 	/*

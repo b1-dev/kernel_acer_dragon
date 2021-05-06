@@ -25,6 +25,7 @@
 #include <linux/percpu.h>
 #include <linux/clockchips.h>
 #include <linux/completion.h>
+#include <linux/cpufreq.h>
 
 #include <linux/atomic.h>
 #include <asm/cacheflush.h>
@@ -43,20 +44,13 @@
 #include <asm/localtimer.h>
 #include <asm/smp_plat.h>
 
+#include <linux/mt_sched_mon.h>
 /*
  * as from 2.5, kernels no longer have an init_tasks structure
  * so we need some other way of telling a new secondary core
  * where to place its SVC stack
  */
 struct secondary_data secondary_data;
-
-enum ipi_msg_type {
-	IPI_TIMER = 2,
-	IPI_RESCHEDULE,
-	IPI_CALL_FUNC,
-	IPI_CALL_FUNC_SINGLE,
-	IPI_CPU_STOP,
-};
 
 static DECLARE_COMPLETION(cpu_running);
 
@@ -383,6 +377,7 @@ static const char *ipi_types[NR_IPI] = {
 	S(IPI_CALL_FUNC, "Function call interrupts"),
 	S(IPI_CALL_FUNC_SINGLE, "Single function call interrupts"),
 	S(IPI_CPU_STOP, "CPU stop interrupts"),
+	S(IPI_CPU_BACKTRACE, "CPU backtrace"),
 };
 
 void show_ipi_list(struct seq_file *p, int prec)
@@ -497,21 +492,82 @@ static DEFINE_RAW_SPINLOCK(stop_lock);
  */
 static void ipi_cpu_stop(unsigned int cpu)
 {
+    printk("\n CPU%u: stopping and cpu_relax,state:%d\n", cpu, system_state);
+    dump_stack();
 	if (system_state == SYSTEM_BOOTING ||
 	    system_state == SYSTEM_RUNNING) {
 		raw_spin_lock(&stop_lock);
 		printk(KERN_CRIT "CPU%u: stopping\n", cpu);
 		dump_stack();
 		raw_spin_unlock(&stop_lock);
-	}
+    }
 
 	set_cpu_online(cpu, false);
 
 	local_fiq_disable();
 	local_irq_disable();
 
+        /* For L1 data coherence with the other cores, 
+         * we need to flush this core's l1 cache. by Chia-Hao Hsu 
+         */
+        flush_cache_all();
+        cpu_proc_fin();
+        flush_cache_all();
+
 	while (1)
 		cpu_relax();
+}
+
+static cpumask_t backtrace_mask;
+static DEFINE_RAW_SPINLOCK(backtrace_lock);
+
+/* "in progress" flag of arch_trigger_all_cpu_backtrace */
+static unsigned long backtrace_flag;
+
+void smp_send_all_cpu_backtrace(void)
+{
+	unsigned int this_cpu = smp_processor_id();
+	int i;
+
+	if (test_and_set_bit(0, &backtrace_flag))
+		/*
+		 * If there is already a trigger_all_cpu_backtrace() in progress
+		 * (backtrace_flag == 1), don't output double cpu dump infos.
+		 */
+		return;
+
+	cpumask_copy(&backtrace_mask, cpu_online_mask);
+	cpu_clear(this_cpu, backtrace_mask);
+
+	pr_info("Backtrace for cpu %d (current):\n", this_cpu);
+	dump_stack();
+
+	pr_info("\nsending IPI to all other CPUs:\n");
+	smp_cross_call(&backtrace_mask, IPI_CPU_BACKTRACE);
+
+	/* Wait for up to 10 seconds for all other CPUs to do the backtrace */
+	for (i = 0; i < 10 * 1000; i++) {
+		if (cpumask_empty(&backtrace_mask))
+			break;
+		mdelay(1);
+	}
+
+	clear_bit(0, &backtrace_flag);
+	smp_mb__after_clear_bit();
+}
+
+/*
+ * ipi_cpu_backtrace - handle IPI from smp_send_all_cpu_backtrace()
+ */
+static void ipi_cpu_backtrace(unsigned int cpu, struct pt_regs *regs)
+{
+	if (cpu_isset(cpu, backtrace_mask)) {
+		raw_spin_lock(&backtrace_lock);
+		pr_warning("IPI backtrace for cpu %d\n", cpu);
+		show_regs(regs);
+		raw_spin_unlock(&backtrace_lock);
+		cpu_clear(cpu, backtrace_mask);
+	}
 }
 
 /*
@@ -532,8 +588,10 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 
 	switch (ipinr) {
 	case IPI_TIMER:
+        mt_trace_ISR_start(ipinr);
 		irq_enter();
 		ipi_timer();
+        mt_trace_ISR_end(ipinr);
 		irq_exit();
 		break;
 
@@ -542,26 +600,40 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 		break;
 
 	case IPI_CALL_FUNC:
+        mt_trace_ISR_start(ipinr);
 		irq_enter();
 		generic_smp_call_function_interrupt();
+        mt_trace_ISR_end(ipinr);
 		irq_exit();
 		break;
 
 	case IPI_CALL_FUNC_SINGLE:
+        mt_trace_ISR_start(ipinr);
 		irq_enter();
 		generic_smp_call_function_single_interrupt();
+        mt_trace_ISR_end(ipinr);
 		irq_exit();
 		break;
 
 	case IPI_CPU_STOP:
+        mt_trace_ISR_start(ipinr);
 		irq_enter();
 		ipi_cpu_stop(cpu);
+        mt_trace_ISR_end(ipinr);
 		irq_exit();
 		break;
 
+	case IPI_CPU_BACKTRACE:
+        mt_trace_ISR_start(ipinr);
+		ipi_cpu_backtrace(cpu, regs);
+        mt_trace_ISR_end(ipinr);
+		break;
+
 	default:
+        mt_trace_ISR_start(ipinr);
 		printk(KERN_CRIT "CPU%u: Unknown IPI message 0x%x\n",
 		       cpu, ipinr);
+        mt_trace_ISR_end(ipinr);
 		break;
 	}
 	set_irq_regs(old_regs);
@@ -572,6 +644,8 @@ void smp_send_reschedule(int cpu)
 	smp_cross_call(cpumask_of(cpu), IPI_RESCHEDULE);
 }
 
+//FIXME For JB Early Release, SS1 Marc will follow up this issue
+#if 0 
 #ifdef CONFIG_HOTPLUG_CPU
 static void smp_kill_cpus(cpumask_t *mask)
 {
@@ -582,6 +656,7 @@ static void smp_kill_cpus(cpumask_t *mask)
 #else
 static void smp_kill_cpus(cpumask_t *mask) { }
 #endif
+#endif 
 
 void smp_send_stop(void)
 {
@@ -590,6 +665,7 @@ void smp_send_stop(void)
 
 	cpumask_copy(&mask, cpu_online_mask);
 	cpumask_clear_cpu(smp_processor_id(), &mask);
+	printk("Send IPI to stop CPUs...\n");
 	smp_cross_call(&mask, IPI_CPU_STOP);
 
 	/* Wait up to one second for other CPUs to stop */
@@ -600,7 +676,8 @@ void smp_send_stop(void)
 	if (num_online_cpus() > 1)
 		pr_warning("SMP: failed to stop secondary CPUs\n");
 
-	smp_kill_cpus(&mask);
+	//FIXME For JB Early Release, SS1 Marc will follow up this issue
+	//smp_kill_cpus(&mask);
 }
 
 /*
@@ -610,3 +687,56 @@ int setup_profiling_timer(unsigned int multiplier)
 {
 	return -EINVAL;
 }
+
+#ifdef CONFIG_CPU_FREQ
+
+static DEFINE_PER_CPU(unsigned long, l_p_j_ref);
+static DEFINE_PER_CPU(unsigned long, l_p_j_ref_freq);
+static unsigned long global_l_p_j_ref;
+static unsigned long global_l_p_j_ref_freq;
+
+static int cpufreq_callback(struct notifier_block *nb,
+					unsigned long val, void *data)
+{
+	struct cpufreq_freqs *freq = data;
+	int cpu = freq->cpu;
+
+	if (freq->flags & CPUFREQ_CONST_LOOPS)
+		return NOTIFY_OK;
+
+	if (!per_cpu(l_p_j_ref, cpu)) {
+		per_cpu(l_p_j_ref, cpu) =
+			per_cpu(cpu_data, cpu).loops_per_jiffy;
+		per_cpu(l_p_j_ref_freq, cpu) = freq->old;
+		if (!global_l_p_j_ref) {
+			global_l_p_j_ref = loops_per_jiffy;
+			global_l_p_j_ref_freq = freq->old;
+		}
+	}
+
+	if ((val == CPUFREQ_PRECHANGE  && freq->old < freq->new) ||
+	    (val == CPUFREQ_POSTCHANGE && freq->old > freq->new) ||
+	    (val == CPUFREQ_RESUMECHANGE || val == CPUFREQ_SUSPENDCHANGE)) {
+		loops_per_jiffy = cpufreq_scale(global_l_p_j_ref,
+						global_l_p_j_ref_freq,
+						freq->new);
+		per_cpu(cpu_data, cpu).loops_per_jiffy =
+			cpufreq_scale(per_cpu(l_p_j_ref, cpu),
+					per_cpu(l_p_j_ref_freq, cpu),
+					freq->new);
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block cpufreq_notifier = {
+	.notifier_call  = cpufreq_callback,
+};
+
+static int __init register_cpufreq_notifier(void)
+{
+	return cpufreq_register_notifier(&cpufreq_notifier,
+						CPUFREQ_TRANSITION_NOTIFIER);
+}
+core_initcall(register_cpufreq_notifier);
+
+#endif

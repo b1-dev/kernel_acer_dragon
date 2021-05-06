@@ -28,7 +28,9 @@
 #include <linux/export.h>
 
 #include "u_serial.h"
+#include "logger.h"
 
+#define ACM_LOG "USB_ACM"
 
 /*
  * This component encapsulates the TTY layer glue needed to provide basic
@@ -135,11 +137,15 @@ static unsigned	n_ports;
 
 
 #ifdef VERBOSE_DEBUG
+#ifndef pr_vdebug
 #define pr_vdebug(fmt, arg...) \
 	pr_debug(fmt, ##arg)
+#endif
 #else
+#ifndef pr_vdebug
 #define pr_vdebug(fmt, arg...) \
 	({ if (0) pr_debug(fmt, ##arg); })
+#endif
 #endif
 
 /*-------------------------------------------------------------------------*/
@@ -360,9 +366,14 @@ __acquires(&port->port_lock)
 */
 {
 	struct list_head	*pool = &port->write_pool;
-	struct usb_ep		*in = port->port_usb->in;
+	//struct usb_ep		*in = port->port_usb->in;
+	struct usb_ep		*in;
 	int			status = 0;
 	bool			do_tty_wake = false;
+
+	if (!port->port_usb) /* abort immediately after disconnect */
+		return -EINVAL;
+	in = port->port_usb->in;
 
 	while (!list_empty(pool)) {
 		struct usb_request	*req;
@@ -386,6 +397,32 @@ __acquires(&port->port_lock)
 		pr_vdebug(PREFIX "%d: tx len=%d, 0x%02x 0x%02x 0x%02x ...\n",
 				port->port_num, len, *((u8 *)req->buf),
 				*((u8 *)req->buf+1), *((u8 *)req->buf+2));
+
+		xlog_printk(ANDROID_LOG_INFO, ACM_LOG, \
+				"%s: ttyGS%d: tx len=%d, 0x%02x 0x%02x 0x%02x ...\n", \
+				__func__, port->port_num, len, *((u8 *)req->buf), \
+				*((u8 *)req->buf+1), *((u8 *)req->buf+2));
+
+		USB_LOGGER(GS_START_TX, GS_START_TX, port->port_num, len);
+
+		#ifdef ENABLE_USB_LOGGER
+		#define OUTPUT_BTYE_NUM 5
+		{
+			int i,j = 0;
+			char* prefix[] = {"p1","p2","p3","p4","p5"};
+			char* suffix[] = {"s1","s2","s3","s4","s5"};
+			for (i = 0; i < req->actual && i < OUTPUT_BTYE_NUM; i++)
+				USB_LOGGER(HEX_NUM, GS_START_TX, prefix[i], *((u8 *)req->buf+i));
+
+			if (req->actual >= OUTPUT_BTYE_NUM*2) {
+				for(i = req->actual-1, j = 1; i >= (req->actual - OUTPUT_BTYE_NUM) \
+					&& i >= OUTPUT_BTYE_NUM; i--,j++) {
+					USB_LOGGER(HEX_NUM, GS_START_TX, suffix[OUTPUT_BTYE_NUM-j], \
+							*((u8 *)req->buf+i));
+				}
+			}
+		}
+		#endif
 
 		/* Drop lock while we call out of driver; completions
 		 * could be issued while we do so.  Disconnection may
@@ -517,6 +554,32 @@ static void gs_rx_push(unsigned long _port)
 			/* normal completion */
 			break;
 		}
+
+		USB_LOGGER(GS_RX_PUSH, GS_RX_PUSH, port->port_num, req->actual, port->n_read);
+
+		xlog_printk(ANDROID_LOG_INFO, ACM_LOG, \
+				"%s: ttyGS%d: actual=%d, n_read=%d 0x%02x 0x%02x 0x%02x ...\n", \
+				__func__, port->port_num, req->actual, port->n_read,
+				*((u8 *)req->buf), *((u8 *)req->buf+1), *((u8 *)req->buf+2));
+
+		#ifdef ENABLE_USB_LOGGER
+		#define OUTPUT_BTYE_NUM 5
+		{
+			int i,j = 0;
+			char* prefix[] = {"p1","p2","p3","p4","p5"};
+			char* suffix[] = {"s1","s2","s3","s4","s5"};
+			for (i = 0; i < req->actual && i < OUTPUT_BTYE_NUM; i++)
+				USB_LOGGER(HEX_NUM, GS_RX_PUSH, prefix[i], *((u8 *)req->buf+i));
+
+			if (req->actual >= OUTPUT_BTYE_NUM*2) {
+				for(i = req->actual-1, j = 1; i >= (req->actual - OUTPUT_BTYE_NUM) \
+					&& i >= OUTPUT_BTYE_NUM; i--,j++) {
+					USB_LOGGER(HEX_NUM, GS_RX_PUSH, suffix[OUTPUT_BTYE_NUM-j], \
+							*((u8 *)req->buf+i));
+				}
+			}
+		}
+		#endif
 
 		/* push data to (open) tty */
 		if (req->actual) {
@@ -811,6 +874,11 @@ static int gs_open(struct tty_struct *tty, struct file *file)
 
 	pr_debug("gs_open: ttyGS%d (%p,%p)\n", port->port_num, tty, file);
 
+	xlog_printk(ANDROID_LOG_INFO, ACM_LOG, \
+		"gs_open: ttyGS%d (%p,%p)\n", port->port_num, tty, file);
+
+	USB_LOGGER(GS_OPEN, GS_OPEN, port->port_num, tty, file);
+
 	status = 0;
 
 exit_unlock_port:
@@ -846,6 +914,11 @@ static void gs_close(struct tty_struct *tty, struct file *file)
 	}
 
 	pr_debug("gs_close: ttyGS%d (%p,%p) ...\n", port->port_num, tty, file);
+
+	xlog_printk(ANDROID_LOG_INFO, ACM_LOG, \
+		"gs_close: ttyGS%d (%p,%p) ...\n", port->port_num, tty, file);
+
+	USB_LOGGER(GS_CLOSE,GS_CLOSE, port->port_num, tty, file);
 
 	/* mark port as closing but in use; we can drop port lock
 	 * and sleep if necessary
@@ -1025,7 +1098,7 @@ static const struct tty_operations gs_tty_ops = {
 
 static struct tty_driver *gs_tty_driver;
 
-static int __init
+static int
 gs_port_alloc(unsigned port_num, struct usb_cdc_line_coding *coding)
 {
 	struct gs_port	*port;
@@ -1071,7 +1144,7 @@ gs_port_alloc(unsigned port_num, struct usb_cdc_line_coding *coding)
  *
  * Returns negative errno or zero.
  */
-int __init gserial_setup(struct usb_gadget *g, unsigned count)
+int gserial_setup(struct usb_gadget *g, unsigned count)
 {
 	unsigned			i;
 	struct usb_cdc_line_coding	coding;

@@ -6,6 +6,7 @@
 #include "sched.h"
 
 #include <linux/slab.h>
+#include "mtlbprof/mtlbprof.h"
 
 static int do_sched_rt_period_timer(struct rt_bandwidth *rt_b, int overrun);
 
@@ -1353,8 +1354,23 @@ static struct task_struct *_pick_next_task_rt(struct rq *rq)
 	if (!rt_rq->rt_nr_running)
 		return NULL;
 
-	if (rt_rq_throttled(rt_rq))
+	if (rt_rq_throttled(rt_rq)){
+		/* prevent wdt from RT throttle */
+		struct rt_prio_array *array = &rt_rq->active;
+		int idx = 0, prio = MAX_RT_PRIO - 1 - idx;  //WDT priority
+
+		if( test_bit(idx, array->bitmap)){
+			list_for_each_entry(rt_se, array->queue + idx, run_list){
+				p = rt_task_of(rt_se);
+				if( (p->rt_priority == prio) && (0 == strncmp(p->comm, "wdtk", 4)) ){
+					p->se.exec_start = rq->clock_task;
+					printk(KERN_WARNING "unthrottle %s\n", p->comm);
+					return p;
+				}
+			}
+		}
 		return NULL;
+	}
 
 	do {
 		rt_se = pick_next_rt_entity(rq, rt_rq);
@@ -1671,6 +1687,7 @@ retry:
 		goto retry;
 	}
 
+	mt_lbprof_printf(MT_LBPROF_TASK, "%d:rt push:%d:%d:%s\n", task_cpu(next_task), lowest_rq->cpu, next_task->pid, next_task->comm);
 	deactivate_task(rq, next_task, 0);
 	set_task_cpu(next_task, lowest_rq->cpu);
 	activate_task(lowest_rq, next_task, 0);
@@ -1755,6 +1772,7 @@ static int pull_rt_task(struct rq *this_rq)
 
 			ret = 1;
 
+			mt_lbprof_printf(MT_LBPROF_TASK, "%d:rt pull:%d:%d:%s\n", task_cpu(p), this_cpu, p->pid, p->comm);
 			deactivate_task(src_rq, p, 0);
 			set_task_cpu(p, this_cpu);
 			activate_task(this_rq, p, 0);
@@ -1983,6 +2001,8 @@ static void watchdog(struct rq *rq, struct task_struct *p)
 
 static void task_tick_rt(struct rq *rq, struct task_struct *p, int queued)
 {
+	struct sched_rt_entity *rt_se = &p->rt;
+
 	update_curr_rt(rq);
 
 	watchdog(rq, p);
@@ -2000,12 +2020,15 @@ static void task_tick_rt(struct rq *rq, struct task_struct *p, int queued)
 	p->rt.time_slice = RR_TIMESLICE;
 
 	/*
-	 * Requeue to the end of queue if we are not the only element
-	 * on the queue:
+	 * Requeue to the end of queue if we (and all of our ancestors) are the
+	 * only element on the queue
 	 */
-	if (p->rt.run_list.prev != p->rt.run_list.next) {
-		requeue_task_rt(rq, p, 0);
-		set_tsk_need_resched(p);
+	for_each_sched_rt_entity(rt_se) {
+		if (rt_se->run_list.prev != rt_se->run_list.next) {
+			requeue_task_rt(rq, p, 0);
+			set_tsk_need_resched(p);
+			return;
+		}
 	}
 }
 

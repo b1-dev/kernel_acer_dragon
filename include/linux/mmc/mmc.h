@@ -24,6 +24,10 @@
 #ifndef LINUX_MMC_MMC_H
 #define LINUX_MMC_MMC_H
 
+/* cause host need tuning mmc/sd bus para and retry the failed cmd, so async request buildin linux mmc driver can't fully support */
+/* small size(64K/128k) read performance will big drop with current async request, so disable it here! */
+//#define MTK_MMC_USE_ASYNC_REQUEST
+
 /* Standard MMC commands (4.1)           type  argument     response */
    /* class 1 */
 #define MMC_GO_IDLE_STATE         0   /* bc                          */

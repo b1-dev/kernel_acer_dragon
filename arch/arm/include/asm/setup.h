@@ -143,6 +143,31 @@ struct tag_memclk {
 	__u32 fmemclk;
 };
 
+/* boot information */
+#define ATAG_BOOT       0x41000802
+
+struct tag_boot {
+        u32 bootmode;
+};
+
+#define ATAG_DEMO_BOOT	0x41000805
+struct tag_demo_boot {
+        u32 demo_bootmode;
+};
+
+/*META com port information*/
+#define ATAG_META_COM 0x41000803
+
+#define ATAG_BATT       0x41000804
+struct tag_batt {
+	u32 batt_vol;
+};
+
+struct tag_meta_com {
+        u32 meta_com_type; /* identify meta via uart or usb */
+    u32 meta_com_id;  /* multiple meta need to know com port id */
+};
+
 struct tag {
 	struct tag_header hdr;
 	union {
@@ -156,6 +181,7 @@ struct tag {
 		struct tag_videolfb	videolfb;
 		struct tag_cmdline	cmdline;
 
+struct tag_demo_boot	demo_boot;
 		/*
 		 * Acorn specific
 		 */
@@ -165,6 +191,9 @@ struct tag {
 		 * DC21285 specific
 		 */
 		struct tag_memclk	memclk;
+                struct tag_boot         boot;
+                struct tag_meta_com     meta_com;
+		struct tag_batt		batt;
 	} u;
 };
 

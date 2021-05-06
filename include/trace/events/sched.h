@@ -8,6 +8,9 @@
 #include <linux/tracepoint.h>
 #include <linux/binfmts.h>
 
+#ifdef CONFIG_MT65XX_TRACER
+#include <trace/events/mt65xx_mon_trace.h>
+#endif
 /*
  * Tracepoint for calling kthread_stop, performed to end a kthread:
  */
@@ -50,47 +53,6 @@ TRACE_EVENT(sched_kthread_stop_ret,
 	TP_printk("ret=%d", __entry->ret)
 );
 
-/*
- * Tracepoint for waking up a task:
- */
-DECLARE_EVENT_CLASS(sched_wakeup_template,
-
-	TP_PROTO(struct task_struct *p, int success),
-
-	TP_ARGS(p, success),
-
-	TP_STRUCT__entry(
-		__array(	char,	comm,	TASK_COMM_LEN	)
-		__field(	pid_t,	pid			)
-		__field(	int,	prio			)
-		__field(	int,	success			)
-		__field(	int,	target_cpu		)
-	),
-
-	TP_fast_assign(
-		memcpy(__entry->comm, p->comm, TASK_COMM_LEN);
-		__entry->pid		= p->pid;
-		__entry->prio		= p->prio;
-		__entry->success	= success;
-		__entry->target_cpu	= task_cpu(p);
-	),
-
-	TP_printk("comm=%s pid=%d prio=%d success=%d target_cpu=%03d",
-		  __entry->comm, __entry->pid, __entry->prio,
-		  __entry->success, __entry->target_cpu)
-);
-
-DEFINE_EVENT(sched_wakeup_template, sched_wakeup,
-	     TP_PROTO(struct task_struct *p, int success),
-	     TP_ARGS(p, success));
-
-/*
- * Tracepoint for waking up a new task:
- */
-DEFINE_EVENT(sched_wakeup_template, sched_wakeup_new,
-	     TP_PROTO(struct task_struct *p, int success),
-	     TP_ARGS(p, success));
-
 #ifdef CREATE_TRACE_POINTS
 static inline long __trace_sched_switch_state(struct task_struct *p)
 {
@@ -107,6 +69,69 @@ static inline long __trace_sched_switch_state(struct task_struct *p)
 	return state;
 }
 #endif
+
+/*
+ * Tracepoint for waking up a task:
+ */
+DECLARE_EVENT_CLASS(sched_wakeup_template,
+
+	TP_PROTO(struct task_struct *p, int success),
+
+	TP_ARGS(p, success),
+
+	TP_STRUCT__entry(
+		__array(	char,	comm,	TASK_COMM_LEN	)
+		__field(	pid_t,	pid			)
+		__field(	int,	prio			)
+		__field(	int,	success			)
+		__field(	int,	target_cpu		)
+#ifdef CONFIG_MTK_SCHED_TRACERS
+        __field(    unsigned char,    state           )
+        // mtk04259: use unsigned char to filter state > 256
+        //           although different from sched_switch
+#endif
+	),
+
+	TP_fast_assign(
+		memcpy(__entry->comm, p->comm, TASK_COMM_LEN);
+		__entry->pid		= p->pid;
+		__entry->prio		= p->prio;
+		__entry->success	= success;
+		__entry->target_cpu	= task_cpu(p);
+#ifdef CONFIG_MTK_SCHED_TRACERS
+        __entry->state      =__trace_sched_switch_state(p);
+#endif
+	),
+
+	TP_printk(
+#ifdef CONFIG_MTK_SCHED_TRACERS
+            "comm=%s pid=%d prio=%d success=%d target_cpu=%03d state=%s",
+#else
+            "comm=%s pid=%d prio=%d success=%d target_cpu=%03d",
+#endif
+		  __entry->comm, __entry->pid, __entry->prio,
+		  __entry->success, __entry->target_cpu
+#ifdef CONFIG_MTK_SCHED_TRACERS
+        ,
+		__entry->state & (TASK_STATE_MAX-1) ?
+		  __print_flags(__entry->state & (TASK_STATE_MAX-1), "|",
+				{ 1, "S"} , { 2, "D" }, { 4, "T" }, { 8, "t" },
+				{ 16, "Z" }, { 32, "X" }, { 64, "x" },
+                { 128, "W" }) : "R"
+#endif
+          )
+);
+
+DEFINE_EVENT(sched_wakeup_template, sched_wakeup,
+	     TP_PROTO(struct task_struct *p, int success),
+	     TP_ARGS(p, success));
+
+/*
+ * Tracepoint for waking up a new task:
+ */
+DEFINE_EVENT(sched_wakeup_template, sched_wakeup_new,
+	     TP_PROTO(struct task_struct *p, int success),
+	     TP_ARGS(p, success));
 
 /*
  * Tracepoint for task switches, performed by the scheduler:
@@ -126,6 +151,9 @@ TRACE_EVENT(sched_switch,
 		__array(	char,	next_comm,	TASK_COMM_LEN	)
 		__field(	pid_t,	next_pid			)
 		__field(	int,	next_prio			)
+#ifdef CONFIG_MTK_SCHED_TRACERS
+        __field(    long,   next_state          )
+#endif
 	),
 
 	TP_fast_assign(
@@ -136,9 +164,17 @@ TRACE_EVENT(sched_switch,
 		memcpy(__entry->prev_comm, prev->comm, TASK_COMM_LEN);
 		__entry->next_pid	= next->pid;
 		__entry->next_prio	= next->prio;
+#ifdef CONFIG_MTK_SCHED_TRACERS
+        __entry->next_state = __trace_sched_switch_state(next);
+#endif
 	),
 
-	TP_printk("prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s%s ==> next_comm=%s next_pid=%d next_prio=%d",
+	TP_printk(
+#ifdef CONFIG_MTK_SCHED_TRACERS
+            "prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s%s ==> next_comm=%s next_pid=%d next_prio=%d next_state=%s",
+#else
+            "prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s%s ==> next_comm=%s next_pid=%d next_prio=%d",
+#endif
 		__entry->prev_comm, __entry->prev_pid, __entry->prev_prio,
 		__entry->prev_state & (TASK_STATE_MAX-1) ?
 		  __print_flags(__entry->prev_state & (TASK_STATE_MAX-1), "|",
@@ -146,7 +182,16 @@ TRACE_EVENT(sched_switch,
 				{ 16, "Z" }, { 32, "X" }, { 64, "x" },
 				{ 128, "W" }) : "R",
 		__entry->prev_state & TASK_STATE_MAX ? "+" : "",
-		__entry->next_comm, __entry->next_pid, __entry->next_prio)
+		__entry->next_comm, __entry->next_pid, __entry->next_prio
+#ifdef CONFIG_MTK_SCHED_TRACERS
+        ,
+		__entry->next_state & (TASK_STATE_MAX-1) ?
+		  __print_flags(__entry->next_state & (TASK_STATE_MAX-1), "|",
+				{ 1, "S"} , { 2, "D" }, { 4, "T" }, { 8, "t" },
+				{ 16, "Z" }, { 32, "X" }, { 64, "x" },
+				{ 128, "W" }) : "R"
+#endif
+        )
 );
 
 /*
@@ -425,7 +470,63 @@ TRACE_EVENT(sched_pi_setprio,
 			__entry->comm, __entry->pid,
 			__entry->oldprio, __entry->newprio)
 );
+#ifdef CONFIG_MTK_SCHED_TRACERS
+TRACE_EVENT(int_switch,
 
+    TP_PROTO(struct task_struct *curr,
+	 int irq, int isr_enter),
+
+    TP_ARGS(curr, irq, isr_enter),
+
+    TP_STRUCT__entry(
+	__array(    char,   prev_comm,	TASK_COMM_LEN	)
+	__field(    pid_t,  prev_pid		)
+	__field(    int,    prev_prio		)
+	__field(    long,   prev_state		)
+	__array(    char,   next_comm,	TASK_COMM_LEN	)
+	__field(    pid_t,  next_pid		)
+	__field(    int,    next_prio		)
+    ),
+
+    TP_fast_assign(
+	memcpy(__entry->next_comm, curr->comm, TASK_COMM_LEN);
+	__entry->prev_pid   = curr->pid;
+	__entry->prev_prio  = curr->prio;
+	__entry->prev_state = curr->state;
+	memcpy(__entry->prev_comm, curr->comm, TASK_COMM_LEN);
+	__entry->next_pid   = curr->pid;
+	__entry->next_prio  = curr->prio;
+    ),
+
+    TP_printk("Int Switch info %d",__entry->prev_pid)
+);
+TRACE_EVENT(int_nest,
+
+    TP_PROTO( int prev_irq, int next_irq),
+
+    TP_ARGS(prev_irq, next_irq),
+
+    TP_STRUCT__entry(
+	__array(    char,   prev_comm,	TASK_COMM_LEN	)
+	__field(    pid_t,  prev_pid		)
+	__field(    int,    prev_prio		)
+	__field(    long,   prev_state		)
+	__array(    char,   next_comm,	TASK_COMM_LEN	)
+	__field(    pid_t,  next_pid		)
+	__field(    int,    next_prio		)
+    ),
+
+    TP_fast_assign(
+	__entry->prev_pid   = prev_irq;
+	__entry->prev_prio  = 120;
+	__entry->prev_state = 0;
+	__entry->next_pid   =next_irq;
+	__entry->next_prio  = 120;
+    ),
+
+    TP_printk("Int nest info %d",__entry->prev_pid)
+);
+#endif
 #endif /* _TRACE_SCHED_H */
 
 /* This part must be outside protection */

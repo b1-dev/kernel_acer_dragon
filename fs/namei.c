@@ -34,9 +34,23 @@
 #include <linux/fs_struct.h>
 #include <linux/posix_acl.h>
 #include <asm/uaccess.h>
+#define PATH_LOOK_FS
+#ifdef USER_BUILD_KERNEL
+#undef PATH_LOOK_FS
+#endif
+
+#ifdef PATH_LOOK_FS
+#include <linux/xlog.h>
+#include <mach/mt_storage_logger.h>
+#include <linux/msdos_fs.h>
+#define FS_TAG "FS_TAG"
+#endif
 
 #include "internal.h"
 #include "mount.h"
+
+
+
 
 /* [Feb-1997 T. Schoebel-Theuer]
  * Fundamental changes in the pathname lookup mechanisms (namei)
@@ -116,6 +130,32 @@
  * POSIX.1 2.4: an empty pathname is invalid (ENOENT).
  * PATH_MAX includes the nul terminator --RR.
  */
+
+#ifdef PATH_LOOK_FS
+static DEFINE_SPINLOCK(lookup_lock);
+static RADIX_TREE(lookup_tree, GFP_KERNEL);
+static LIST_HEAD(free_lookup_head);
+#define MAX_LOOKUP_LIST_SIZE 10
+
+struct lookup_entry{
+	long pid;
+	unsigned long long time1;
+	unsigned long long time2;
+	unsigned long long lookup_start;
+	unsigned long long lookup_end;
+	unsigned long long i_lookup_start;
+	unsigned long long i_lookup_end;
+	unsigned long long dcache_alloc_start;
+	unsigned long long dcache_alloc_end;
+	bool isRCU;
+	bool isIO;
+	char parent_name[FAT_LFN_LEN];
+	struct list_head lookup_link;
+};
+
+static struct lookup_entry lookup_entry_list[MAX_LOOKUP_LIST_SIZE];
+#endif
+
 static int do_getname(const char __user *filename, char *page)
 {
 	int retval;
@@ -1094,6 +1134,55 @@ static struct dentry *lookup_dcache(struct qstr *name, struct dentry *dir,
 	}
 	return dentry;
 }
+#ifdef PATH_LOOK_FS
+static struct lookup_entry* get_lookup_entry_by_procid(unsigned int procid)
+{
+	return radix_tree_lookup(&lookup_tree, procid);
+}
+static void init_lookup_list(void)
+{
+	int i=0;
+	struct lookup_entry *temp_entry;
+	for(i=0; i<MAX_LOOKUP_LIST_SIZE; i++){
+		temp_entry = &lookup_entry_list[i];
+		spin_lock(&lookup_lock);
+		list_add(&temp_entry->lookup_link, &free_lookup_head);
+		spin_unlock(&lookup_lock);
+	}
+}
+static struct lookup_entry* get_free_lookup_entry(void)
+{
+	struct lookup_entry *res_entry = NULL;
+	if(!list_empty(&free_lookup_head))
+	{	
+		res_entry = list_entry((&free_lookup_head)->next, struct lookup_entry, lookup_link);
+		spin_lock(&lookup_lock);
+		list_del(&res_entry->lookup_link);
+		spin_unlock(&lookup_lock);
+		memset(res_entry, 0, sizeof *res_entry);
+	}
+	return res_entry;
+}
+
+static void lookup_entry_insert(struct lookup_entry *entry)
+{	
+	spin_lock(&lookup_lock);
+	radix_tree_insert(&lookup_tree, entry->pid, (void *)entry);
+	spin_unlock(&lookup_lock);
+	
+}
+
+static void lookup_entry_delete(int pid)
+{
+	//get_lookup_entry_by_procid(pid);
+	struct lookup_entry *temp_entry;
+	spin_lock(&lookup_lock);
+	temp_entry = radix_tree_delete(&lookup_tree, pid);
+	//tree_node_size --;
+	list_add(&temp_entry->lookup_link, &free_lookup_head);
+	spin_unlock(&lookup_lock);
+}
+#endif
 
 /*
  * Call i_op->lookup on the dentry.  The dentry must be negative but may be
@@ -1105,14 +1194,30 @@ static struct dentry *lookup_real(struct inode *dir, struct dentry *dentry,
 				  struct nameidata *nd)
 {
 	struct dentry *old;
+#ifdef PATH_LOOK_FS
+	struct lookup_entry *this_entry;
+#endif
 
 	/* Don't create child dentry for a dead directory. */
 	if (unlikely(IS_DEADDIR(dir))) {
 		dput(dentry);
 		return ERR_PTR(-ENOENT);
 	}
-
+#ifdef PATH_LOOK_FS
+	//spin_lock(&lookup_lock);
+	this_entry = get_lookup_entry_by_procid(current->pid);
+	if(this_entry)
+	{
+		this_entry->i_lookup_start = sched_clock();
+		this_entry->isIO = true;
+	}
+	//spin_unlock(&lookup_lock);
+#endif
 	old = dir->i_op->lookup(dir, dentry, nd);
+#ifdef PATH_LOOK_FS
+	if(this_entry)
+		this_entry->i_lookup_end = sched_clock();
+#endif
 	if (unlikely(old)) {
 		dput(dentry);
 		dentry = old;
@@ -1120,17 +1225,35 @@ static struct dentry *lookup_real(struct inode *dir, struct dentry *dentry,
 	return dentry;
 }
 
+
+
+
 static struct dentry *__lookup_hash(struct qstr *name,
 		struct dentry *base, struct nameidata *nd)
 {
 	bool need_lookup;
 	struct dentry *dentry;
-
+	struct dentry *res_dentry;
+#ifdef PATH_LOOK_FS
+	struct lookup_entry *this_entry;
+	//spin_lock(&lookup_lock);
+	this_entry = get_lookup_entry_by_procid(current->pid);
+	if(this_entry)
+	{
+		this_entry->dcache_alloc_start = sched_clock();
+	}
+	//spin_unlock(&lookup_lock);
+#endif
 	dentry = lookup_dcache(name, base, nd, &need_lookup);
+#ifdef PATH_LOOK_FS
+	if(this_entry)
+		this_entry->dcache_alloc_end = sched_clock();
+#endif
 	if (!need_lookup)
 		return dentry;
+	res_dentry = lookup_real(base->d_inode, dentry, nd);
 
-	return lookup_real(base->d_inode, dentry, nd);
+	return res_dentry;
 }
 
 /*
@@ -1146,7 +1269,40 @@ static int do_lookup(struct nameidata *nd, struct qstr *name,
 	int need_reval = 1;
 	int status = 1;
 	int err;
+#ifdef PATH_LOOK_FS
+	/*=========Add Time log to analyze the long folder fetch=======*/
+	int DUMP_THRESHOLD = dumpFsRecTime();
+	static bool is_init = false;
+	struct lookup_entry *this_entry = NULL;
+	
+	//if(tree_node_size = -100)
+	//	tree_node_size = 0;
+	//if(tree_node_size<MAX_LOOKUP_LIST_SIZE)
+	//	this_entry = (struct lookup_entry*)kzalloc(sizeof(struct lookup_entry), GFP_KERNEL);
+	if(!is_init){
+		init_lookup_list();
+		is_init = true;
+	}
+	
+	this_entry = get_free_lookup_entry();
 
+	if(this_entry)
+	{
+		if(parent!=NULL && (parent->d_name.name!=NULL))
+		{
+			strcpy(this_entry->parent_name, parent->d_name.name);
+		}
+		this_entry->pid = current->pid;		
+		this_entry->isRCU = false;
+		this_entry->isIO = false;
+		this_entry->time1 = sched_clock();		  
+		this_entry->time2=this_entry->time1;
+		this_entry->lookup_start= this_entry->lookup_end = this_entry->time1;
+		this_entry->dcache_alloc_start= this_entry->dcache_alloc_end = this_entry->time1;
+		this_entry->i_lookup_start= this_entry->i_lookup_end = this_entry->time1;
+		lookup_entry_insert(this_entry);
+	}	
+#endif
 	/*
 	 * Rename seqlock is not required here because in the off chance
 	 * of a false negative due to a concurrent rename, we're going to
@@ -1155,6 +1311,10 @@ static int do_lookup(struct nameidata *nd, struct qstr *name,
 	if (nd->flags & LOOKUP_RCU) {
 		unsigned seq;
 		*inode = nd->inode;
+#ifdef PATH_LOOK_FS
+		if(this_entry)
+			this_entry->isRCU = true;	
+#endif
 		dentry = __d_lookup_rcu(parent, name, &seq, inode);
 		if (!dentry)
 			goto unlazy;
@@ -1185,8 +1345,16 @@ unlazy:
 		if (unlazy_walk(nd, dentry))
 			return -ECHILD;
 	} else {
+#ifdef PATH_LOOK_FS
+		if(this_entry)
+	        this_entry->lookup_start = sched_clock();
+#endif
 		dentry = __d_lookup(parent, name);
 	}
+#ifdef PATH_LOOK_FS
+	if(this_entry)
+		this_entry->lookup_end = sched_clock();
+#endif
 
 	if (unlikely(!dentry))
 		goto need_lookup;
@@ -1219,6 +1387,26 @@ done:
 	if (err)
 		nd->flags |= LOOKUP_JUMPED;
 	*inode = path->dentry->d_inode;
+#ifdef PATH_LOOK_FS
+	if(this_entry)
+	{
+		this_entry->time2 = sched_clock();		  
+		if((this_entry->time2 - this_entry->time1) >= (unsigned long long)DUMP_THRESHOLD*1000000)
+		{
+			if(this_entry->parent_name)
+			{
+				xlog_printk(ANDROID_LOG_INFO, FS_TAG, 
+				"LookUpDir: parent(%s) curdir(%s) isRCU(%d) isIOAccess(%d), timestamp(%lld) lookup(%lld) alloc_dcache(%lld) IO(%lld)\n",
+				this_entry->parent_name, name->name, this_entry->isRCU, this_entry->isIO, this_entry->time2-this_entry->time1, 
+				this_entry->lookup_end-this_entry->lookup_start,this_entry->dcache_alloc_end-this_entry->dcache_alloc_start, 
+				this_entry->i_lookup_end-this_entry->i_lookup_start);
+			}
+		}
+		lookup_entry_delete(this_entry->pid);
+		//kfree(this_entry);
+	}
+#endif
+
 	return 0;
 
 need_lookup:

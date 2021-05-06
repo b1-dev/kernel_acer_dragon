@@ -17,9 +17,12 @@
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/utsname.h>
+#include <linux/xlog.h>
 
 #include <linux/usb/composite.h>
 #include <asm/unaligned.h>
+
+#include "logger.h"
 
 /*
  * The code in this file is utility code, used to build a gadget driver
@@ -209,9 +212,15 @@ int usb_add_function(struct usb_configuration *config,
 {
 	int	value = -EINVAL;
 
+	xlog_printk(ANDROID_LOG_DEBUG, "USB", "%s: \n", __func__);
+
+
 	DBG(config->cdev, "adding '%s'/%p to config '%s'/%p\n",
 			function->name, function,
 			config->label, config);
+
+	USB_LOGGER(USB_ADD_FUNCTION, USB_ADD_FUNCTION, function->name, function, \
+		config->label, config);
 
 	if (!function->set_alt || !function->disable)
 		goto done;
@@ -396,6 +405,9 @@ static int config_buf(struct usb_configuration *config,
 
 		if (!descriptors)
 			continue;
+
+		USB_LOGGER(STRING, CONFIG_BUF, "usbfn", f->name);
+
 		status = usb_descriptor_fillbuf(next, len,
 			(const struct usb_descriptor_header **) descriptors);
 		if (status < 0)
@@ -406,6 +418,12 @@ static int config_buf(struct usb_configuration *config,
 
 	len = next - buf;
 	c->wTotalLength = cpu_to_le16(len);
+
+	USB_LOGGER(DEVICE_DESCRIPTOR, CONFIG_BUF, c->bLength, \
+					   c->bDescriptorType, c->wTotalLength, \
+					   c->bNumInterfaces, c->bConfigurationValue,\
+					   c->iConfiguration, c->bmAttributes, \
+					   c->bMaxPower);
 	return len;
 }
 
@@ -665,6 +683,9 @@ static int set_config(struct usb_composite_dev *cdev,
 		}
 
 		result = f->set_alt(f, tmp, 0);
+
+		USB_LOGGER(STRING, SET_CONFIG, "func", f->name);
+
 		if (result < 0) {
 			DBG(cdev, "interface %d (%s/%p) alt 0 --> %d\n",
 					tmp, f->name, f, result);
@@ -734,10 +755,12 @@ int usb_add_config(struct usb_composite_dev *cdev,
 
 	INIT_LIST_HEAD(&config->functions);
 	config->next_interface_id = 0;
+	memset(config->interface, 0, sizeof(config->interface));
 
 	status = bind(config);
 	if (status < 0) {
 		list_del(&config->list);
+		xlog_printk(ANDROID_LOG_DEBUG, "USB","%s: bind fialed and the list should be init because there is one entry only");
 		config->cdev = NULL;
 	} else {
 		unsigned	i;
@@ -772,6 +795,57 @@ done:
 		DBG(cdev, "added config '%s'/%u --> %d\n", config->label,
 				config->bConfigurationValue, status);
 	return status;
+}
+
+static int unbind_config(struct usb_composite_dev *cdev,
+			      struct usb_configuration *config)
+{
+	while (!list_empty(&config->functions)) {
+		struct usb_function		*f;
+
+		f = list_first_entry(&config->functions,
+				struct usb_function, list);
+		list_del(&f->list);
+		if (f->unbind) {
+			DBG(cdev, "unbind function '%s'/%p\n", f->name, f);
+			f->unbind(config, f);
+			/* may free memory for "f" */
+		}
+	}
+
+	if (config->unbind) {
+		DBG(cdev, "unbind config '%s'/%p\n", config->label, config);
+		config->unbind(config);
+		/* may free memory for "c" */
+	}
+
+	return 0;
+}
+
+/**
+ * usb_remove_config() - remove a configuration from a device.
+ * @cdev: wraps the USB gadget
+ * @config: the configuration
+ *
+ * Drivers must call usb_gadget_disconnect before calling this function
+ * to disconnect the device from the host and make sure the host will not
+ * try to enumerate the device while we are changing the config list.
+ */
+int usb_remove_config(struct usb_composite_dev *cdev,
+		      struct usb_configuration *config)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cdev->lock, flags);
+
+	if (cdev->config == config)
+		reset_config(cdev);
+
+	list_del(&config->list);
+
+	spin_unlock_irqrestore(&cdev->lock, flags);
+
+	return unbind_config(cdev, config);
 }
 
 /*-------------------------------------------------------------------------*/
@@ -1040,6 +1114,9 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 	req->length = 0;
 	gadget->ep0->driver_data = cdev;
 
+	USB_LOGGER(COMPOSITE_SETUP, COMPOSITE_SETUP, ctrl->bRequestType, \
+		ctrl->bRequest, w_value, w_value, w_length);
+
 	switch (ctrl->bRequest) {
 
 	/* we handle all standard USB descriptors */
@@ -1132,7 +1209,12 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 			goto unknown;
 		if (!cdev->config || intf >= MAX_CONFIG_INTERFACES)
 			break;
-		f = cdev->config->interface[intf];
+
+		if (cdev->config)
+			f = cdev->config->interface[intf];
+		else
+			printk("%s: cdev->config = NULL \n", __func__);
+
 		if (!f)
 			break;
 		if (w_value && !f->set_alt)
@@ -1250,14 +1332,17 @@ unknown:
 			break;
 		}
 
-		if (f && f->setup)
+		if (f && f->setup) {
+			USB_LOGGER(STRING, COMPOSITE_SETUP, "func", f->name);
 			value = f->setup(f, ctrl);
-		else {
+		} else {
 			struct usb_configuration	*c;
 
 			c = cdev->config;
-			if (c && c->setup)
+			if (c && c->setup) {
+				USB_LOGGER(STRING, COMPOSITE_SETUP, "config", c->label);
 				value = c->setup(c, ctrl);
+			}
 		}
 
 		goto done;
@@ -1280,6 +1365,7 @@ unknown:
 	}
 
 done:
+	USB_LOGGER(DEC_NUM, COMPOSITE_SETUP, "ret", value);
 	/* device either stalls (value < 0) or reports success */
 	return value;
 }
@@ -1297,6 +1383,14 @@ static void composite_disconnect(struct usb_gadget *gadget)
 		reset_config(cdev);
 	if (composite->disconnect)
 		composite->disconnect(cdev);
+
+	/* ALPS00235316 and ALPS00234976 */
+	/* reset the complet function */
+	if(cdev->req->complete)	{
+		xlog_printk(ANDROID_LOG_DEBUG, "USB", "%s:  reassign the complete function!!\n", __func__);
+		cdev->req->complete = composite_setup_complete;
+	}
+
 	spin_unlock_irqrestore(&cdev->lock, flags);
 }
 
@@ -1328,28 +1422,10 @@ composite_unbind(struct usb_gadget *gadget)
 
 	while (!list_empty(&cdev->configs)) {
 		struct usb_configuration	*c;
-
 		c = list_first_entry(&cdev->configs,
 				struct usb_configuration, list);
-		while (!list_empty(&c->functions)) {
-			struct usb_function		*f;
-
-			f = list_first_entry(&c->functions,
-					struct usb_function, list);
-			list_del(&f->list);
-			if (f->unbind) {
-				DBG(cdev, "unbind function '%s'/%p\n",
-						f->name, f);
-				f->unbind(c, f);
-				/* may free memory for "f" */
-			}
-		}
 		list_del(&c->list);
-		if (c->unbind) {
-			DBG(cdev, "unbind config '%s'/%p\n", c->label, c);
-			c->unbind(c);
-			/* may free memory for "c" */
-		}
+		unbind_config(cdev, c);
 	}
 	if (composite->unbind)
 		composite->unbind(cdev);
@@ -1576,6 +1652,8 @@ int usb_composite_probe(struct usb_composite_driver *driver,
 {
 	if (!driver || !driver->dev || !bind || composite)
 		return -EINVAL;
+
+	xlog_printk(ANDROID_LOG_DEBUG, "USB", "%s: driver->name = %s", __func__, driver->name);
 
 	if (!driver->name)
 		driver->name = "composite";

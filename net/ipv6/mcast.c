@@ -995,6 +995,13 @@ int ipv6_chk_mcast_addr(struct net_device *dev, const struct in6_addr *group,
 		read_unlock_bh(&idev->lock);
 	}
 	rcu_read_unlock();
+	
+#ifdef MTK_IPV6_TETHER_NDP_MODE
+    printk(KERN_INFO "check flag for tethering over IPv6 NDP mode\n");
+    if(dev->flags & IFF_ALLMULTI)
+        rv = 1;
+#endif
+
 	return rv;
 }
 

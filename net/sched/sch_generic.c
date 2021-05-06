@@ -800,6 +800,11 @@ static bool some_qdisc_is_busy(struct net_device *dev)
 
 		dev_queue = netdev_get_tx_queue(dev, i);
 		q = dev_queue->qdisc_sleeping;
+		if(q == NULL){
+            printk(KERN_WARNING "some_qdisc_is_busy dev=0x%x, i=%d, dev_q=0x%x",
+				(u32)dev, i, (u32)dev_queue);
+			BUG_ON(q == NULL);
+		}
 		root_lock = qdisc_lock(q);
 
 		spin_lock_bh(root_lock);

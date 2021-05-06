@@ -16,6 +16,12 @@
 #include <linux/mutex.h>
 #include <linux/gfp.h>
 #include <linux/suspend.h>
+#ifdef MTK_CPU_HOTPLUG_DEBUG
+#include <linux/kallsyms.h>
+#endif //MTK_CPU_HOTPLUG_DEBUG
+#ifdef CONFIG_MT_LOAD_BALANCE_PROFILER
+#include <mtlbprof/mtlbprof.h>
+#endif
 
 #ifdef CONFIG_SMP
 /* Serializes the updates to cpu_online_mask, cpu_present_mask */
@@ -35,7 +41,11 @@ void cpu_maps_update_done(void)
 	mutex_unlock(&cpu_add_remove_lock);
 }
 
+#ifdef MTK_CPU_HOTPLUG_DEBUG
+RAW_NOTIFIER_HEAD(cpu_chain);
+#else //MTK_CPU_HOTPLUG_DEBUG
 static RAW_NOTIFIER_HEAD(cpu_chain);
+#endif //MTK_CPU_HOTPLUG_DEBUG
 
 /* If set, cpu_up and cpu_down will return -EBUSY and do nothing.
  * Should always be manipulated under cpu_add_remove_lock
@@ -133,6 +143,23 @@ static void cpu_hotplug_done(void) {}
 int __ref register_cpu_notifier(struct notifier_block *nb)
 {
 	int ret;
+
+#ifdef MTK_CPU_HOTPLUG_DEBUG
+	static int index = 0;
+ #ifdef CONFIG_KALLSYMS
+	char namebuf[128] = {0};
+	const char *symname;
+	
+	symname = kallsyms_lookup((unsigned long)nb->notifier_call, NULL, NULL, NULL, namebuf);
+	if (symname) 
+		printk("[cpu_ntf] <%02d>%08lx (%s)\n", index++, (unsigned long)nb->notifier_call, symname);
+	else
+		printk("[cpu_ntf] <%02d>%08lx\n", index++, (unsigned long)nb->notifier_call);
+ #else //#ifdef CONFIG_KALLSYMS
+	printk("[cpu_ntf] <%02d>%08lx\n", index++, (unsigned long)nb->notifier_call);
+ #endif //#ifdef CONFIG_KALLSYMS
+#endif //#ifdef MTK_CPU_HOTPLUG_DEBUG
+
 	cpu_maps_update_begin();
 	ret = raw_notifier_chain_register(&cpu_chain, nb);
 	cpu_maps_update_done();
@@ -257,6 +284,10 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
 	/* This actually kills the CPU. */
 	__cpu_die(cpu);
 
+#ifdef CONFIG_MT_LOAD_BALANCE_PROFILER
+	mt_lbprof_update_state(cpu, MT_LBPROF_HOTPLUG_STATE);
+#endif
+
 	/* CPU is completely dead: tell everyone.  Too late to complain. */
 	cpu_notify_nofail(CPU_DEAD | mod, hcpu);
 
@@ -316,6 +347,9 @@ static int __cpuinit _cpu_up(unsigned int cpu, int tasks_frozen)
 
 	/* Now call notifier in preparation. */
 	cpu_notify(CPU_ONLINE | mod, hcpu);
+#ifdef CONFIG_MT_LOAD_BALANCE_PROFILER
+	mt_lbprof_update_state(cpu, MT_LBPROF_NO_TASK_STATE);
+#endif
 
 out_notify:
 	if (ret != 0)
@@ -668,3 +702,23 @@ void init_cpu_online(const struct cpumask *src)
 {
 	cpumask_copy(to_cpumask(cpu_online_bits), src);
 }
+
+static ATOMIC_NOTIFIER_HEAD(idle_notifier);
+
+void idle_notifier_register(struct notifier_block *n)
+{
+	atomic_notifier_chain_register(&idle_notifier, n);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_register);
+
+void idle_notifier_unregister(struct notifier_block *n)
+{
+	atomic_notifier_chain_unregister(&idle_notifier, n);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_unregister);
+
+void idle_notifier_call_chain(unsigned long val)
+{
+	atomic_notifier_call_chain(&idle_notifier, val, NULL);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_call_chain);

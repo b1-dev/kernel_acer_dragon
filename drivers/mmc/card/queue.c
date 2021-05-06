@@ -18,6 +18,7 @@
 
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
+#include <linux/mmc/mmc.h>  /* access MTK_MMC_USE_ASYNC_REQUEST marco */
 #include "queue.h"
 
 #define MMC_QUEUE_BOUNCESZ	65536
@@ -65,7 +66,11 @@ static int mmc_queue_thread(void *d)
 		mq->mqrq_cur->req = req;
 		spin_unlock_irq(q->queue_lock);
 
+#ifdef MTK_MMC_USE_ASYNC_REQUEST
 		if (req || mq->mqrq_prev->req) {
+#else
+		if (req) {
+#endif
 			set_current_state(TASK_RUNNING);
 			mq->issue_fn(mq, req);
 		} else {
@@ -82,7 +87,9 @@ static int mmc_queue_thread(void *d)
 		mq->mqrq_prev->brq.mrq.data = NULL;
 		mq->mqrq_prev->req = NULL;
 		tmp = mq->mqrq_prev;
+#ifdef MTK_MMC_USE_ASYNC_REQUEST
 		mq->mqrq_prev = mq->mqrq_cur;
+#endif
 		mq->mqrq_cur = tmp;
 	} while (1);
 	up(&mq->thread_sem);
@@ -162,7 +169,7 @@ int mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card,
 		   spinlock_t *lock, const char *subname)
 {
 	struct mmc_host *host = card->host;
-	u64 limit = BLK_BOUNCE_HIGH;
+	u64 limit = BLK_BOUNCE_ANY;
 	int ret;
 	struct mmc_queue_req *mqrq_cur = &mq->mqrq[0];
 	struct mmc_queue_req *mqrq_prev = &mq->mqrq[1];

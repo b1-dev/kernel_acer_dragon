@@ -877,6 +877,15 @@ static ssize_t fsg_store_file(struct device *dev, struct device_attribute *attr,
 		return -EBUSY;				/* "Door is locked" */
 	}
 
+	printk("fsg_store_file file=%s, count=%d, curlun->cdrom=%d\n", buf, count, curlun->cdrom);
+	
+	/* 
+	 * WORKAROUND:VOLD would clean the file path after switching to bicr.
+	 * So when the lun is being a CD-ROM a.k.a. BICR. Dont clean the file path to empty.
+	 */
+	if (curlun->cdrom == 1 && count == 1)
+		return count;
+
 	/* Remove a trailing newline */
 	if (count > 0 && buf[count-1] == '\n')
 		((char *) buf)[count-1] = 0;		/* Ugh! */

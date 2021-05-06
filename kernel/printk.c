@@ -42,6 +42,7 @@
 #include <linux/notifier.h>
 #include <linux/rculist.h>
 
+#include <linux/aee.h>
 #include <asm/uaccess.h>
 
 #define CREATE_TRACE_POINTS
@@ -56,12 +57,24 @@ void asmlinkage __attribute__((weak)) early_printk(const char *fmt, ...)
 
 #define __LOG_BUF_LEN	(1 << CONFIG_LOG_BUF_SHIFT)
 
+#ifdef        CONFIG_DEBUG_LL
+extern void printascii(char *);
+#endif
+
+#ifdef CONFIG_PRINTK_PROCESS_INFO
+static int printk_prefix = 2;
+#else
+static int printk_prefix = 1;
+#endif
+
+static bool printk_disable_uart = 0;
+
 /* printk's without a loglevel use this.. */
 #define DEFAULT_MESSAGE_LOGLEVEL CONFIG_DEFAULT_MESSAGE_LOGLEVEL
 
 /* We show everything that is MORE important than this.. */
 #define MINIMUM_CONSOLE_LOGLEVEL 1 /* Minimum loglevel we let people use */
-#define DEFAULT_CONSOLE_LOGLEVEL 7 /* anything MORE serious than KERN_DEBUG */
+#define DEFAULT_CONSOLE_LOGLEVEL 6 /* anything MORE serious than KERN_INFO */
 
 DECLARE_WAIT_QUEUE_HEAD(log_wait);
 
@@ -112,9 +125,9 @@ static DEFINE_RAW_SPINLOCK(logbuf_lock);
  * The indices into log_buf are not constrained to log_buf_len - they
  * must be masked before subscripting
  */
-static unsigned log_start;	/* Index into log_buf: next char to be read by syslog() */
+unsigned log_start;	/* Index into log_buf: next char to be read by syslog() */
 static unsigned con_start;	/* Index into log_buf: next char to be sent to consoles */
-static unsigned log_end;	/* Index into log_buf: most-recently-written-char + 1 */
+unsigned log_end;	/* Index into log_buf: most-recently-written-char + 1 */
 
 /*
  * If exclusive_console is non-NULL then only this console is to be printed to.
@@ -292,6 +305,74 @@ static inline void boot_delay_msec(void)
 {
 }
 #endif
+
+/*
+ * Return the number of unread characters in the log buffer.
+ */
+static int log_buf_get_len(void)
+{
+	return logged_chars;
+}
+
+/*
+ * Clears the ring-buffer
+ */
+void log_buf_clear(void)
+{
+	logged_chars = 0;
+}
+
+/*
+ * Copy a range of characters from the log buffer.
+ */
+int log_buf_copy(char *dest, int idx, int len)
+{
+	int ret, max;
+	bool took_lock = false;
+
+	if (!oops_in_progress) {
+		raw_spin_lock_irq(&logbuf_lock);
+		took_lock = true;
+	}
+
+	max = log_buf_get_len();
+	if (idx < 0 || idx >= max) {
+		ret = -1;
+	} else {
+		if (len > max - idx)
+			len = max - idx;
+		ret = len;
+		idx += (log_end - max);
+		while (len-- > 0)
+			dest[len] = LOG_BUF(idx + len);
+	}
+
+	if (took_lock)
+		raw_spin_unlock_irq(&logbuf_lock);
+
+	return ret;
+}
+
+
+int log_buf_copy2(char *dest, int dest_len, int log_copy_start, int log_copy_end)
+{
+	bool took_lock = false;
+	int count;
+
+	if (!oops_in_progress) {
+		raw_spin_lock_irq(&logbuf_lock);
+		took_lock = true;
+	}
+
+	for (count = 0; (log_copy_start != log_end) && (log_copy_start != log_copy_end) && (count < dest_len); log_copy_start++) {
+		dest[count++] = LOG_BUF(log_copy_start);
+	}
+
+	if (took_lock)
+		raw_spin_unlock_irq(&logbuf_lock);
+
+	return count;
+}
 
 #ifdef CONFIG_SECURITY_DMESG_RESTRICT
 int dmesg_restrict = 1;
@@ -515,9 +596,12 @@ static void __call_console_drivers(unsigned start, unsigned end)
 	struct console *con;
 
 	for_each_console(con) {
+		int conenable;
+
 		if (exclusive_console && con != exclusive_console)
 			continue;
-		if ((con->flags & CON_ENABLED) && con->write &&
+		conenable = (con->flags & CON_ENABLED) && !(printk_disable_uart && (con->flags & CON_CONSDEV));
+		if (conenable && con->write &&
 				(cpu_online(smp_processor_id()) ||
 				(con->flags & CON_ANYTIME)))
 			con->write(con, &LOG_BUF(start), end - start);
@@ -706,6 +790,7 @@ static bool printk_time = 1;
 static bool printk_time = 0;
 #endif
 module_param_named(time, printk_time, bool, S_IRUGO | S_IWUSR);
+module_param_named(disable_uart, printk_disable_uart, bool, S_IRUGO | S_IWUSR);
 
 static bool always_kmsg_dump;
 module_param_named(always_kmsg_dump, always_kmsg_dump, bool, S_IRUGO | S_IWUSR);
@@ -884,6 +969,10 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 	printed_len += vscnprintf(printk_buf + printed_len,
 				  sizeof(printk_buf) - printed_len, fmt, args);
 
+#ifdef	CONFIG_DEBUG_LL
+	printascii(printk_buf);
+#endif
+
 	p = printk_buf;
 
 	/* Read log level and handle special printk prefix */
@@ -945,9 +1034,42 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 					emit_log_char(*tp);
 				printed_len += tlen;
 			}
+            switch (printk_prefix) {
+                case 1: {
+                            emit_log_char('(');
+                            /* We don't expect to support CPU# > 16 */
+                            if (this_cpu < 16) {
+                                char cbuf = hex_asc_lo(this_cpu);
+                                emit_log_char(cbuf);
+                            }
+                            else {
+                                emit_log_char('X');
+                            }
+                            emit_log_char(')');
 
-			if (!*p)
-				break;
+                            printed_len += 4;
+                            break;
+                        }
+
+                case 2: {
+                            char tbuf[50], *tp;
+                            unsigned tlen;
+
+                            tlen = snprintf(tbuf, sizeof(tbuf), "(%x)[%d:%s]",
+                                    this_cpu, current->pid, current->comm);
+
+                            for (tp = tbuf; tp < tbuf + tlen; tp++)
+                                emit_log_char(*tp);
+                            printed_len += tlen;
+                            break;
+
+                        }
+
+            }
+
+
+            if (!*p)
+                break;
 		}
 
 		emit_log_char(*p);
@@ -1161,7 +1283,6 @@ static int __cpuinit console_cpu_notify(struct notifier_block *self,
 	switch (action) {
 	case CPU_ONLINE:
 	case CPU_DEAD:
-	case CPU_DYING:
 	case CPU_DOWN_FAILED:
 	case CPU_UP_CANCELED:
 		console_lock();
@@ -1267,11 +1388,13 @@ void wake_up_klogd(void)
  *
  * console_unlock(); may be called from any context.
  */
+static int already_skip_log;
 void console_unlock(void)
 {
 	unsigned long flags;
 	unsigned _con_start, _log_end;
 	unsigned wake_klogd = 0, retry = 0;
+    unsigned long total_log_size = 0;
 
 	if (console_suspended) {
 		up(&console_sem);
@@ -1291,7 +1414,22 @@ again:
 		con_start = log_end;		/* Flush */
 		raw_spin_unlock(&logbuf_lock);
 		stop_critical_timings();	/* don't trace print latency */
+
+        /*
+            For uart console, 10us/per chars
+            400,000 chars = need to wait 4.0 sec
+        */
+        total_log_size += _log_end - _con_start;
+        if(total_log_size < 400000)
 		call_console_drivers(_con_start, _log_end);
+        else if(!already_skip_log){
+            char aee_str[40];
+            sprintf( aee_str, "PRINTK too much:%lu", total_log_size );
+            aee_kernel_warning(aee_str,"Need to shrink kernel log");
+            already_skip_log = 1;
+        }
+        /**/
+
 		start_critical_timings();
 		local_irq_restore(flags);
 	}

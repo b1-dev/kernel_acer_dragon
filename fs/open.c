@@ -30,6 +30,10 @@
 #include <linux/fs_struct.h>
 #include <linux/ima.h>
 #include <linux/dnotify.h>
+#if 1 //wschen 2012-03-21
+#include <linux/pipe_fs_i.h>
+#include <linux/wait.h>
+#endif
 
 #include "internal.h"
 
@@ -397,9 +401,11 @@ SYSCALL_DEFINE1(fchdir, unsigned int, fd)
 	struct file *file;
 	struct inode *inode;
 	int error;
+	int fput_needed;	//++ for linux kernel patch 20120718
 
 	error = -EBADF;
-	file = fget(fd);
+	//file = fget(fd);								//-- for linux kernel patch 20120718
+	file = fget_raw_light(fd, &fput_needed);	//++ for linux kernel patch 20120718
 	if (!file)
 		goto out;
 
@@ -413,7 +419,8 @@ SYSCALL_DEFINE1(fchdir, unsigned int, fd)
 	if (!error)
 		set_fs_pwd(current->fs, &file->f_path);
 out_putf:
-	fput(file);
+	//fput(file);						//-- for linux kernel patch 20120718
+	fput_light(file, fput_needed);	//++ for linux kernel patch 20120718
 out:
 	return error;
 }
@@ -1072,6 +1079,14 @@ SYSCALL_DEFINE1(close, unsigned int, fd)
 	struct fdtable *fdt;
 	int retval;
 
+#if 1 //wschen 2012-03-21
+	struct inode *inode;
+	struct pipe_inode_info *pipe;
+        wait_queue_head_t *qhead;
+
+try_again:
+#endif
+
 	spin_lock(&files->file_lock);
 	fdt = files_fdtable(files);
 	if (fd >= fdt->max_fds)
@@ -1079,6 +1094,69 @@ SYSCALL_DEFINE1(close, unsigned int, fd)
 	filp = fdt->fd[fd];
 	if (!filp)
 		goto out_unlock;
+
+#if 1 //wschen 2012-03-21 CTS testInterruptWritablePipeChannel fail
+        if (!thread_group_empty(current) && filp->f_path.dentry) {
+            inode = filp->f_path.dentry->d_inode;
+            if (inode) {
+                pipe = inode->i_pipe;
+                if (pipe && (pipe->writers == 1) && (pipe->readers == 1)) {
+
+                    if ((filp->f_mode == FMODE_WRITE) && (filp->f_flags == O_WRONLY)) {
+                        if ((pipe->waiting_writers == 1)) {
+                            qhead = &pipe->wait;
+                            if (qhead) {
+                                if (waitqueue_active(qhead)) {
+
+                                    struct task_struct *p;
+                                    struct list_head *tmp = &qhead->task_list;
+                                    wait_queue_t *w;
+
+                                    w = list_entry(tmp->next, wait_queue_t, task_list);
+                                    if (w && (w->func == autoremove_wake_function)) {
+                                        p = (struct task_struct *) w->private;
+                                        if (p && (p->pid > 0) && (p->tgid > 0) && same_thread_group(p, current)) {
+                                            set_tsk_thread_flag(p, TIF_SIGPENDING);
+                                            wake_up_interruptible(qhead);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (pipe->waiting_writers == 0) {
+                            if (mutex_trylock(&inode->i_mutex) == 0) {
+                                spin_unlock(&files->file_lock);
+                                schedule();
+                                goto try_again;
+                            } else {
+                                mutex_unlock(&inode->i_mutex);
+                            }
+                        }
+                    } else if ((filp->f_mode == FMODE_READ) && (filp->f_flags == O_RDONLY) && (pipe->waiting_writers == 0)) {
+                        qhead = &pipe->wait;
+                        if (qhead) {
+                            if (waitqueue_active(qhead)) {
+
+                                struct task_struct *p;
+                                struct list_head *tmp = &qhead->task_list;
+                                wait_queue_t *w;
+
+                                w = list_entry(tmp->next, wait_queue_t, task_list);
+                                if (w && (w->func == autoremove_wake_function)) {
+                                    p = (struct task_struct *) w->private;
+                                    if (p && (p->pid > 0) && (p->tgid > 0) && same_thread_group(p, current)) {
+                                        filp->f_flags |= O_NONBLOCK;
+                                        set_tsk_thread_flag(p, TIF_SIGPENDING);
+                                        wake_up_interruptible(qhead);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+#endif
+
 	rcu_assign_pointer(fdt->fd[fd], NULL);
 	__clear_close_on_exec(fd, fdt);
 	__put_unused_fd(files, fd);

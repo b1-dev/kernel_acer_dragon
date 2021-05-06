@@ -22,6 +22,9 @@
 #include "bus.h"
 #include "mmc_ops.h"
 #include "sd_ops.h"
+#ifdef MTK_EMMC_SUPPORT
+	extern int init_pmt(void);
+#endif
 
 static const unsigned int tran_exp[] = {
 	10000,		100000,		1000000,	10000000,
@@ -1270,6 +1273,14 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 	if (!oldcard)
 		host->card = card;
 
+#ifdef MTK_EMMC_SUPPORT_OTP 
+    /* enable hc erase grp size */
+    printk("switch to hc erase grp size\n");
+    err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+            EXT_CSD_ERASE_GROUP_DEF, 1, 0);
+    card->ext_csd.erase_group_def = 1;
+#endif
+
 	mmc_free_ext_csd(ext_csd);
 	return 0;
 
@@ -1516,6 +1527,10 @@ int mmc_attach_mmc(struct mmc_host *host)
 
 	mmc_release_host(host);
 	err = mmc_add_card(host->card);
+#ifdef MTK_EMMC_SUPPORT
+	err = init_pmt();
+	host->card_init_complete(host);
+#endif
 	mmc_claim_host(host);
 	if (err)
 		goto remove_card;
